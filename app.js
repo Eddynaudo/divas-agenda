@@ -473,10 +473,10 @@ function showNotice(n, total) {
     box.className = 'confirm-backdrop';
     box.innerHTML = `
       <div class="confirm-card glass" role="alertdialog" aria-modal="true">
-        <div class="bio-icon" style="width:58px;height:58px;margin:0 auto 10px;color:var(--ok);border-color:rgba(127,209,166,.5);background:rgba(127,209,166,.12)" aria-hidden="true">${ICON.check}</div>
-        <h2>${esc(n.title.replace(/^✅\s*/, ''))}</h2>
+        ${/^❌/.test(n.title) ? `<div class="bio-icon" style="width:58px;height:58px;margin:0 auto 10px;color:var(--danger);border-color:rgba(240,138,138,.5);background:rgba(240,138,138,.12)" aria-hidden="true">${ICON.close}</div>` : `<div class="bio-icon" style="width:58px;height:58px;margin:0 auto 10px;color:var(--ok);border-color:rgba(127,209,166,.5);background:rgba(127,209,166,.12)" aria-hidden="true">${ICON.check}</div>`}
+        <h2>${esc(n.title.replace(/^(✅|❌)\s*/, ''))}</h2>
         <p style="text-align:center;margin:0 0 14px;font-size:15.5px">${esc(n.body || '')}</p>
-        <p class="note" style="text-align:center;margin:0 0 14px">Il promemoria è stato inviato alla cliente: l'appuntamento è confermato in agenda.</p>
+        <p class="note" style="text-align:center;margin:0 0 14px">${n.kind === 'request_decided' ? 'Eriola ha valutato la tua richiesta.' : 'Il promemoria è stato inviato alla cliente: l\'appuntamento è confermato in agenda.'}</p>
         <button class="btn gold block" data-ok>OK, ricevuto</button>
         ${n.appointment_id ? '<button class="btn ghost block" data-open style="margin-top:8px">Apri appuntamento</button>' : ''}
       </div>`;
@@ -1530,22 +1530,36 @@ const draftCount = () => {
   return d.add.length + Object.keys(d.update).length + Object.keys(d.delete).length + g.add.length + g.rename.length + g.delete.length;
 };
 function clearDraft() { S.invDraft = { add: [], update: {}, delete: {}, groups: { add: [], rename: [], delete: [] } }; saveDraft(); }
-// nome del gruppo dopo le rinomine in bozza (solo dipendenti)
-function effGroup(name) {
-  const g = S.invDraft?.groups; if (!g || isManager()) return name;
-  let n = name; g.rename.forEach((r) => { if (r.from === n) n = r.to; });
-  const del = g.delete.find((x) => x.name === n);
-  return del && del.moveTo ? effGroup(del.moveTo) : n;
+// operazioni sui gruppi non ancora definitive (dipendente): prima quelle in attesa di Eriola, poi la bozza
+function groupOps() {
+  const ops = { add: [], rename: [], delete: [] };
+  if (isManager()) return ops;
+  [...(S.invPending || []).map((p) => p.groups), S.invDraft?.groups].forEach((g) => {
+    if (!g) return; ops.add.push(...(g.add || [])); ops.rename.push(...(g.rename || [])); ops.delete.push(...(g.delete || []));
+  });
+  return ops;
+}
+function effGroupNoMove(name) { let n = name; groupOps().rename.forEach((r) => { if (r.from === n) n = r.to; }); return n; }
+function effGroup(name, depth = 0) {
+  const n = effGroupNoMove(name);
+  const del = groupOps().delete.find((x) => x.name === n);
+  return del && del.moveTo && depth < 5 ? effGroup(del.moveTo, depth + 1) : n;
 }
 function groupNames() {
   let names = (S.groups || []).map((g) => g.name);
   (S.products || []).forEach((p) => { if (p.group_name && !names.includes(p.group_name)) names.push(p.group_name); });
-  const g = S.invDraft?.groups;
-  if (g && !isManager()) {
-    names = names.map(effGroup).concat(g.add);
-    names = names.filter((n) => !g.delete.some((x) => x.name === n));
+  const ops = groupOps();
+  if (!isManager()) {
+    names = names.map(effGroupNoMove).concat(ops.add);
+    names = names.filter((n) => !ops.delete.some((x) => x.name === n));
   }
   return [...new Set(names)].sort((a, b) => a.localeCompare(b, 'it'));
+}
+function groupStatus(name) {
+  if (isManager()) return '';
+  const inP = (S.invPending || []).some((p) => (p.groups?.add || []).includes(name) || (p.groups?.rename || []).some((r) => r.to === name));
+  const inD = (S.invDraft?.groups?.add || []).includes(name) || (S.invDraft?.groups?.rename || []).some((r) => r.to === name);
+  return inD ? 'bozza' : inP ? 'attesa' : '';
 }
 
 function draftPayload() {
@@ -1558,11 +1572,6 @@ function draftPayload() {
       groups: JSON.parse(JSON.stringify(d.groups || { add: [], rename: [], delete: [] })),
     },
   };
-}
-function effGroupNoMove(name) {
-  const g = S.invDraft?.groups; let n = name;
-  (g?.rename || []).forEach((r) => { if (r.from === n) n = r.to; });
-  return n;
 }
 function productLabel(p) { return `${p.name}${p.size ? ' (' + p.size + ')' : ''}`; }
 function inventoryLines(inv) {
@@ -1601,20 +1610,34 @@ async function renderMagazzino() {
   if (!S.invDraft) loadDraft();
   const view = $('#view');
   if (!S.products) { view.innerHTML = '<div class="muted">Caricamento…</div>'; await loadProducts(); }
+  if (!isManager()) {
+    const { data: mine } = await sb.from('change_requests').select('payload').eq('requested_by', S.user.id).eq('status', 'pending');
+    S.invPending = (mine || []).map((r) => r.payload?.inventory).filter(Boolean);
+  } else S.invPending = [];
   if (S.tab !== 'magazzino') return;
   const q = (S.invQuery || '').toLowerCase().trim();
   const d = S.invDraft;
+  // modifiche già inviate e in attesa di Eriola
+  const pend = { add: [], update: {}, delete: {} };
+  (S.invPending || []).forEach((inv) => {
+    (inv.add || []).forEach((x) => pend.add.push(x));
+    (inv.update || []).forEach((u) => { pend.update[u.id] = u.after; });
+    (inv.delete || []).forEach((x) => { pend.delete[x.id] = true; });
+  });
   // elenco effettivo: prodotti + bozza del dipendente
   let items = (S.products || []).map((p) => {
     const up = d.update[p.id];
-    const x = { ...p, ...(up ? up.after : {}), _state: d.delete[p.id] ? 'delete' : up ? 'update' : '' };
-    if (!isManager() && d.groups) {
-      const gdel = d.groups.delete.find((g) => g.name === effGroupNoMove(x.group_name));
-      if (gdel && !gdel.moveTo) x._state = 'delete';
+    const x = { ...p, ...(pend.update[p.id] || {}), ...(up ? up.after : {}) };
+    x._state = d.delete[p.id] ? 'delete' : up ? 'update' : '';
+    x._pending = pend.delete[p.id] ? 'delete' : pend.update[p.id] ? 'update' : '';
+    if (!isManager()) {
+      const gdel = groupOps().delete.find((g) => g.name === effGroupNoMove(x.group_name));
+      if (gdel && !gdel.moveTo) x._pending = 'delete';
       x.group_name = effGroup(x.group_name);
     }
     return x;
   });
+  items = items.concat(pend.add.map((x, i) => ({ ...x, group_name: effGroup(x.group_name), id: 'pending-' + i, _pending: 'add', _locked: true })));
   items = items.concat(d.add.map((x) => ({ ...x, id: x.tmpId, _state: 'add' })));
   const match = (p) => !q || [p.name, p.specs, p.size, p.group_name].some((v) => String(v || '').toLowerCase().includes(q));
   items = items.filter(match);
@@ -1622,8 +1645,10 @@ async function renderMagazzino() {
 
   const row = (p) => {
     const img = productImg(p.image_path);
-    const badge = p._state === 'add' ? '<span class="badge info">Nuovo · in attesa</span>' : p._state === 'update' ? '<span class="badge warn">Modificato · in attesa</span>' : p._state === 'delete' ? '<span class="badge danger">Da eliminare · in attesa</span>' : '';
-    return `<button class="prod glass ${p._state === 'delete' ? 'del' : ''}" data-id="${p.id}">
+    const draftLbl = { add: 'Nuovo', update: 'Modificato', delete: 'Da eliminare' };
+    const badge = (p._state ? `<span class="badge info">${draftLbl[p._state]} · in bozza</span>` : '')
+      + (p._pending ? `<span class="badge warn">⏳ ${draftLbl[p._pending]} · attesa conferma Eriola</span>` : '');
+    return `<button class="prod glass ${p._state === 'delete' || p._pending === 'delete' ? 'del' : ''}" data-id="${p.id}">
       <span class="prod-img">${img ? `<img src="${img}" alt="" loading="lazy">` : `<i>${esc(initials(p.name))}</i>`}</span>
       <span class="prod-info"><strong>${esc(p.name)}</strong>
         <small>${esc([p.size, p.specs].filter(Boolean).join(' · '))}</small>
@@ -1647,7 +1672,7 @@ async function renderMagazzino() {
       const n = Object.values(subs).reduce((s, l) => s + l.length, 0);
       const open = q || S.invOpen[g];
       return `<section class="inv-group glass ${open ? 'open' : ''}" data-g="${esc(g)}">
-        <div class="inv-head-row"><button class="inv-head"><span><strong>${esc(g)}</strong><small>${n} ${n === 1 ? 'prodotto' : 'prodotti'}${!isManager() && (S.invDraft.groups.add.includes(g)) ? ' · nuovo, in attesa' : ''}</small></span><span class="chev">${ICON.right}</span></button>
+        <div class="inv-head-row"><button class="inv-head"><span><strong>${esc(g)}</strong><small>${n} ${n === 1 ? 'prodotto' : 'prodotti'}${groupStatus(g) === 'bozza' ? ' · in bozza' : groupStatus(g) === 'attesa' ? ' · ⏳ attesa conferma Eriola' : ''}</small></span><span class="chev">${ICON.right}</span></button>
           <button class="mini-btn grp-edit" data-g="${esc(g)}" aria-label="Modifica gruppo">${ICON.edit}</button></div>
         <div class="inv-body">${n ? '' : '<div class="muted" style="padding:4px 6px 8px;font-size:14px">Nessun prodotto in questo gruppo</div>'}${Object.keys(subs).sort().map((sg) => `${sg ? `<div class="section-t" style="margin:12px 4px 8px">${esc(sg)}</div>` : ''}<div class="list">${subs[sg].sort((a, b) => a.name.localeCompare(b.name, 'it')).map(row).join('')}</div>`).join('')}</div>
       </section>`;
@@ -1663,6 +1688,7 @@ async function renderMagazzino() {
     </div>
     ${mode === 'groups' ? `<button class="btn block" id="newGroup" style="margin-bottom:10px">${ICON.plus} Nuovo gruppo</button>` : ''}
     <p class="note" style="margin:0 2px 10px">${total} prodotti in magazzino${!isManager() ? ' · le tue modifiche vanno approvate da Eriola' : ''}</p>
+    ${!isManager() && (S.invPending || []).length ? `<p class="pending-note" style="margin:0 0 10px">⏳ Hai ${(S.invPending || []).length} ${(S.invPending || []).length === 1 ? 'richiesta' : 'richieste'} in attesa di conferma da Eriola: puoi continuare a lavorare, riceverai una notifica quando le approva.</p>` : ''}
     ${body}
     ${!isManager() && draftCount() ? `<div class="draft-bar glass"><span><strong>${draftCount()} ${draftCount() === 1 ? 'modifica' : 'modifiche'} in bozza</strong><small>Non ancora inviate all'amministratrice</small></span><button class="btn gold" id="sendDraft">Invia</button></div>` : ''}`;
 
@@ -1677,6 +1703,7 @@ async function renderMagazzino() {
   $$('.prod', view).forEach((b) => b.addEventListener('click', () => {
     const id = b.dataset.id;
     const p = items.find((x) => String(x.id) === id);
+    if (p._locked) return toast('Prodotto in attesa di conferma da Eriola');
     openProductForm(p);
   }));
   $('#sendDraft')?.addEventListener('click', () => confirmLeaveMagazzino(null, true));
