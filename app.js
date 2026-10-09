@@ -1384,6 +1384,7 @@ async function logoDataUrl() {
 const pdfText = (t) => fmtMoneyText(t).replace(/→/g, '->').replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}️]/gu, '').replace(/€/g, 'EUR').trim();
 
 async function buildActivityPdf(day, rows, filterLabel) {
+  if (!isManager()) throw new Error('Sezione riservata all\'amministrazione');
   await ensurePdfLibs();
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF({ unit: 'mm', format: 'a4' });
@@ -1434,6 +1435,7 @@ async function buildActivityPdf(day, rows, filterLabel) {
 }
 
 async function openActivityArchive() {
+  if (!isManager()) return toast('Sezione riservata all\'amministrazione');
   const staff = (S.team || []).filter((m) => m.role === 'staff');
   const st = { day: startOfDay(new Date()), who: 'staff' };
   openSheet(`
