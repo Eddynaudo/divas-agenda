@@ -410,3 +410,8 @@ input::placeholder, textarea::placeholder { color: rgba(255,255,255,.45); font-w
 .chk input:checked + span { background: var(--gold) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M5 12.5l4.2 4.2L19 7' fill='none' stroke='%231a1408' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center/16px no-repeat; }
 .msg-lock { display: flex; flex-direction: column; gap: 14px; padding: 12px; border-radius: 14px; border: 1px solid var(--line); background: rgba(255,255,255,.03); }
 .msg-lock.locked { border-color: rgba(240,195,107,.3); }
+.inv-head-row { display: flex; align-items: center; gap: 6px; padding-right: 12px; }
+.inv-head-row .inv-head { flex: 1; }
+.radio-row { flex-direction: row; align-items: center; gap: 10px; flex-wrap: wrap; color: var(--text); font-size: 15px; }
+.radio-row input[type=radio] { width: 20px; height: 20px; accent-color: var(--gold); flex: none; }
+.radio-row select { flex: 1; min-width: 150px; }

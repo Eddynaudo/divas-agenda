@@ -1521,10 +1521,32 @@ const invKey = () => `divas-inv-draft-${S.user?.id}`;
 function loadDraft() {
   try { S.invDraft = JSON.parse(localStorage.getItem(invKey()) || 'null'); } catch { S.invDraft = null; }
   if (!S.invDraft) S.invDraft = { add: [], update: {}, delete: {} };
+  S.invDraft.groups ||= { add: [], rename: [], delete: [] };
 }
 function saveDraft() { try { localStorage.setItem(invKey(), JSON.stringify(S.invDraft)); } catch {} }
-const draftCount = () => S.invDraft ? S.invDraft.add.length + Object.keys(S.invDraft.update).length + Object.keys(S.invDraft.delete).length : 0;
-function clearDraft() { S.invDraft = { add: [], update: {}, delete: {} }; saveDraft(); }
+const draftCount = () => {
+  const d = S.invDraft; if (!d) return 0;
+  const g = d.groups || { add: [], rename: [], delete: [] };
+  return d.add.length + Object.keys(d.update).length + Object.keys(d.delete).length + g.add.length + g.rename.length + g.delete.length;
+};
+function clearDraft() { S.invDraft = { add: [], update: {}, delete: {}, groups: { add: [], rename: [], delete: [] } }; saveDraft(); }
+// nome del gruppo dopo le rinomine in bozza (solo dipendenti)
+function effGroup(name) {
+  const g = S.invDraft?.groups; if (!g || isManager()) return name;
+  let n = name; g.rename.forEach((r) => { if (r.from === n) n = r.to; });
+  const del = g.delete.find((x) => x.name === n);
+  return del && del.moveTo ? effGroup(del.moveTo) : n;
+}
+function groupNames() {
+  let names = (S.groups || []).map((g) => g.name);
+  (S.products || []).forEach((p) => { if (p.group_name && !names.includes(p.group_name)) names.push(p.group_name); });
+  const g = S.invDraft?.groups;
+  if (g && !isManager()) {
+    names = names.map(effGroup).concat(g.add);
+    names = names.filter((n) => !g.delete.some((x) => x.name === n));
+  }
+  return [...new Set(names)].sort((a, b) => a.localeCompare(b, 'it'));
+}
 
 function draftPayload() {
   const d = S.invDraft;
@@ -1533,8 +1555,14 @@ function draftPayload() {
       add: d.add.map(({ tmpId, ...x }) => x),
       update: Object.entries(d.update).map(([id, u]) => ({ id, before: u.before, after: u.after })),
       delete: Object.entries(d.delete).map(([id, x]) => ({ id, name: x.name, size: x.size })),
+      groups: JSON.parse(JSON.stringify(d.groups || { add: [], rename: [], delete: [] })),
     },
   };
+}
+function effGroupNoMove(name) {
+  const g = S.invDraft?.groups; let n = name;
+  (g?.rename || []).forEach((r) => { if (r.from === n) n = r.to; });
+  return n;
 }
 function productLabel(p) { return `${p.name}${p.size ? ' (' + p.size + ')' : ''}`; }
 function inventoryLines(inv) {
@@ -1551,13 +1579,21 @@ function inventoryLines(inv) {
     out.push({ kind: 'update', i, text: `${productLabel(u.before || u.after)}: ${bits.join(', ') || 'nessuna modifica'}` });
   });
   (inv.delete || []).forEach((x, i) => out.push({ kind: 'delete', i, text: `Elimina: ${productLabel(x)}` }));
+  const g = inv.groups || {};
+  (g.add || []).forEach((n, i) => out.push({ kind: 'gadd', i, text: `Nuovo gruppo: ${n}` }));
+  (g.rename || []).forEach((r, i) => out.push({ kind: 'grename', i, text: `Rinomina gruppo "${r.from}" → "${r.to}"` }));
+  (g.delete || []).forEach((x, i) => out.push({ kind: 'gdelete', i, text: `Elimina gruppo "${x.name}"${x.moveTo ? ` (prodotti spostati in "${x.moveTo}")` : ' e i suoi prodotti'}` }));
   return out;
 }
 
 async function loadProducts() {
-  const { data, error } = await sb.from('products').select('*').order('group_name').order('name').order('sort');
+  const [{ data, error }, { data: groups }] = await Promise.all([
+    sb.from('products').select('*').order('group_name').order('name').order('sort'),
+    sb.from('product_groups').select('*').order('sort').order('name'),
+  ]);
   if (error) { fail(error); return; }
   S.products = data || [];
+  S.groups = groups || [];
 }
 
 async function renderMagazzino() {
@@ -1571,7 +1607,13 @@ async function renderMagazzino() {
   // elenco effettivo: prodotti + bozza del dipendente
   let items = (S.products || []).map((p) => {
     const up = d.update[p.id];
-    return { ...p, ...(up ? up.after : {}), _state: d.delete[p.id] ? 'delete' : up ? 'update' : '' };
+    const x = { ...p, ...(up ? up.after : {}), _state: d.delete[p.id] ? 'delete' : up ? 'update' : '' };
+    if (!isManager() && d.groups) {
+      const gdel = d.groups.delete.find((g) => g.name === effGroupNoMove(x.group_name));
+      if (gdel && !gdel.moveTo) x._state = 'delete';
+      x.group_name = effGroup(x.group_name);
+    }
+    return x;
   });
   items = items.concat(d.add.map((x) => ({ ...x, id: x.tmpId, _state: 'add' })));
   const match = (p) => !q || [p.name, p.specs, p.size, p.group_name].some((v) => String(v || '').toLowerCase().includes(q));
@@ -1597,6 +1639,7 @@ async function renderMagazzino() {
     body = `<div class="list">${items.sort((a, b) => a.name.localeCompare(b.name, 'it')).map(row).join('')}</div>`;
   } else {
     const groups = {};
+    if (!q) groupNames().forEach((g) => { groups[g] ||= {}; });
     items.forEach((p) => { const g = p.group_name || 'Altro'; (groups[g] ||= {})[subgroupOf(p) || ''] ||= []; groups[g][subgroupOf(p) || ''].push(p); });
     S.invOpen ||= {};
     body = Object.keys(groups).sort((a, b) => a.localeCompare(b, 'it')).map((g) => {
@@ -1604,8 +1647,9 @@ async function renderMagazzino() {
       const n = Object.values(subs).reduce((s, l) => s + l.length, 0);
       const open = q || S.invOpen[g];
       return `<section class="inv-group glass ${open ? 'open' : ''}" data-g="${esc(g)}">
-        <button class="inv-head"><span><strong>${esc(g)}</strong><small>${n} prodotti</small></span><span class="chev">${ICON.right}</span></button>
-        <div class="inv-body">${Object.keys(subs).sort().map((sg) => `${sg ? `<div class="section-t" style="margin:12px 4px 8px">${esc(sg)}</div>` : ''}<div class="list">${subs[sg].sort((a, b) => a.name.localeCompare(b.name, 'it')).map(row).join('')}</div>`).join('')}</div>
+        <div class="inv-head-row"><button class="inv-head"><span><strong>${esc(g)}</strong><small>${n} ${n === 1 ? 'prodotto' : 'prodotti'}${!isManager() && (S.invDraft.groups.add.includes(g)) ? ' · nuovo, in attesa' : ''}</small></span><span class="chev">${ICON.right}</span></button>
+          <button class="mini-btn grp-edit" data-g="${esc(g)}" aria-label="Modifica gruppo">${ICON.edit}</button></div>
+        <div class="inv-body">${n ? '' : '<div class="muted" style="padding:4px 6px 8px;font-size:14px">Nessun prodotto in questo gruppo</div>'}${Object.keys(subs).sort().map((sg) => `${sg ? `<div class="section-t" style="margin:12px 4px 8px">${esc(sg)}</div>` : ''}<div class="list">${subs[sg].sort((a, b) => a.name.localeCompare(b.name, 'it')).map(row).join('')}</div>`).join('')}</div>
       </section>`;
     }).join('');
   }
@@ -1617,6 +1661,7 @@ async function renderMagazzino() {
       <button data-v="groups" class="${mode === 'groups' ? 'on' : ''}">Per gruppo</button>
       <button data-v="list" class="${mode === 'list' ? 'on' : ''}">Elenco</button>
     </div>
+    ${mode === 'groups' ? `<button class="btn block" id="newGroup" style="margin-bottom:10px">${ICON.plus} Nuovo gruppo</button>` : ''}
     <p class="note" style="margin:0 2px 10px">${total} prodotti in magazzino${!isManager() ? ' · le tue modifiche vanno approvate da Eriola' : ''}</p>
     ${body}
     ${!isManager() && draftCount() ? `<div class="draft-bar glass"><span><strong>${draftCount()} ${draftCount() === 1 ? 'modifica' : 'modifiche'} in bozza</strong><small>Non ancora inviate all'amministratrice</small></span><button class="btn gold" id="sendDraft">Invia</button></div>` : ''}`;
@@ -1624,6 +1669,8 @@ async function renderMagazzino() {
   const qi = $('#invQ');
   qi.addEventListener('input', () => { S.invQuery = qi.value; clearTimeout(S._invT); S._invT = setTimeout(() => { renderMagazzino().then(() => { const n = $('#invQ'); n.focus(); n.setSelectionRange(n.value.length, n.value.length); }); }, 250); });
   $$('.view-switch button', view).forEach((b) => b.addEventListener('click', () => { S.invView = b.dataset.v; renderMagazzino(); }));
+  $('#newGroup')?.addEventListener('click', () => openGroupSheet(null));
+  $$('.grp-edit', view).forEach((b) => b.addEventListener('click', () => openGroupSheet(b.dataset.g)));
   $$('.inv-head', view).forEach((h) => h.addEventListener('click', () => {
     const sec = h.closest('.inv-group'); sec.classList.toggle('open'); S.invOpen[sec.dataset.g] = sec.classList.contains('open');
   }));
@@ -1640,7 +1687,8 @@ function openProductForm(p, opts = {}) {
   const admin = isManager();
   const review = !!opts.onReview; // l'admin modifica una proposta prima di approvarla
   const v = p ? { ...p } : { name: '', group_name: S.invLastGroup || (S.products?.[0]?.group_name || ''), specs: '', size: '', price: null, stock: null, image_path: null };
-  const groups = [...new Set((S.products || []).map((x) => x.group_name).filter(Boolean))].sort();
+  const groups = groupNames();
+  if (!v.group_name) v.group_name = groups[0] || 'Altro';
   let newImage = v.image_path;
   openSheet(`
     ${sheetHead(review ? 'Modifica proposta' : isNew ? 'Nuovo prodotto' : 'Prodotto', review ? 'Correggi i valori prima di approvare' : admin ? '' : 'Le modifiche verranno inviate a Eriola per l\'approvazione')}
@@ -1653,8 +1701,7 @@ function openProductForm(p, opts = {}) {
         </div>
       </div>
       <label>Nome prodotto<input id="pName" required value="${esc(v.name)}"></label>
-      <label>Gruppo / marca<input id="pGroup" list="pGroups" value="${esc(v.group_name || '')}" placeholder="Es. Balmain Paris"></label>
-      <datalist id="pGroups">${groups.map((g) => `<option value="${esc(g)}">`).join('')}</datalist>
+      <label>Gruppo<select id="pGroup">${[...new Set([...groups, v.group_name].filter(Boolean))].map((g) => `<option value="${esc(g)}" ${g === v.group_name ? 'selected' : ''}>${esc(g)}</option>`).join('')}<option value="__new">＋ Nuovo gruppo…</option></select></label>
       <label>Specifiche<textarea id="pSpecs" rows="3" placeholder="Linea, descrizione, codice…">${esc(v.specs || '')}</textarea></label>
       <div class="row3">
         <label>Formato (ml)<input id="pSize" value="${esc(v.size || '')}" placeholder="250 ml"></label>
@@ -1675,6 +1722,15 @@ function openProductForm(p, opts = {}) {
       newImage = path;
       $('#pImg', root).innerHTML = `<img src="${productImg(path)}" alt="">`;
       toast('Foto pronta: ricordati di salvare');
+    });
+    $('#pGroup', root).addEventListener('change', async (e) => {
+      if (e.target.value !== '__new') return;
+      const n = (prompt('Nome del nuovo gruppo:') || '').trim();
+      if (!n) { e.target.value = v.group_name; return; }
+      const ok = await addGroup(n);
+      if (!ok) { e.target.value = v.group_name; return; }
+      e.target.insertAdjacentHTML('afterbegin', `<option value="${esc(n)}">${esc(n)}</option>`);
+      e.target.value = n;
     });
     $('#pNoImg', root)?.addEventListener('click', () => { newImage = null; $('#pImg', root).innerHTML = `<i>${esc(initials(v.name || '?'))}</i>`; });
     const read = () => ({
@@ -1730,6 +1786,80 @@ function openProductForm(p, opts = {}) {
       if (p._state === 'add') d.add = d.add.filter((x) => x.tmpId !== p.id);
       delete d.update[p.id]; delete d.delete[p.id];
       saveDraft(); closeSheet(); renderMagazzino();
+    });
+  });
+}
+
+/* gruppi: aggiungi / rinomina / elimina */
+async function addGroup(name) {
+  if (groupNames().includes(name)) { toast('Esiste già un gruppo con questo nome'); return false; }
+  if (isManager()) {
+    if (!(await secureConfirm({ title: 'Creare il nuovo gruppo?', lines: [name], okLabel: 'Sì, crea', identity: isSub() }))) return false;
+    const { error } = await sb.from('product_groups').insert({ name, sort: (S.groups || []).length + 1 });
+    if (error) { fail(error); return false; }
+    sb.rpc('log_group_event', { p_text: `nuovo gruppo ${name}` }).then(() => {}, () => {});
+    await loadProducts();
+  } else { S.invDraft.groups.add.push(name); saveDraft(); toast('Gruppo aggiunto alla bozza'); }
+  return true;
+}
+function openGroupSheet(name) {
+  const isNew = !name;
+  const count = isNew ? 0 : (S.products || []).filter((p) => effGroup(p.group_name) === name).length;
+  const others = groupNames().filter((g) => g !== name);
+  openSheet(`
+    ${sheetHead(isNew ? 'Nuovo gruppo' : 'Gruppo', isNew ? 'Es. una nuova marca o un nuovo listino' : `${count} ${count === 1 ? 'prodotto' : 'prodotti'}`)}
+    <form class="form" id="gForm" autocomplete="off">
+      <label>Nome del gruppo<input id="gName" required value="${esc(name || '')}" placeholder="Es. Davines"></label>
+      <button class="btn gold block">${isNew ? 'Crea gruppo' : 'Salva nome'}</button>
+      ${isNew ? '' : `<div class="section-t">Elimina gruppo</div>
+        ${count ? `<label class="radio-row"><input type="radio" name="gDel" value="move" checked> Sposta i ${count} prodotti in
+          <select id="gMoveTo">${others.map((g) => `<option value="${esc(g)}">${esc(g)}</option>`).join('')}</select></label>
+          <label class="radio-row"><input type="radio" name="gDel" value="all"> Elimina anche i ${count} prodotti</label>` : '<p class="note" style="margin:0">Il gruppo è vuoto.</p>'}
+        <button type="button" class="btn danger block" id="gDelete">${ICON.trash} Elimina gruppo</button>`}
+      ${!isManager() ? '<p class="note" style="margin:0">Le modifiche ai gruppi vanno in bozza e le approva Eriola.</p>' : ''}
+    </form>`, (root) => {
+    $('#gForm', root).addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const n = $('#gName', root).value.trim();
+      if (!n) return;
+      if (isNew) { if (await addGroup(n)) { closeSheet(); renderMagazzino(); } return; }
+      if (n === name) { closeSheet(); return; }
+      if (groupNames().includes(n)) return toast('Esiste già un gruppo con questo nome');
+      if (isManager()) {
+        if (!(await secureConfirm({ title: 'Rinominare il gruppo?', lines: [`"${name}" → "${n}" (${count} prodotti)`], okLabel: 'Sì, rinomina', identity: isSub() }))) return;
+        const { error } = await sb.rpc('rename_product_group', { p_old: name, p_new: n });
+        if (error) return fail(error);
+        await loadProducts();
+      } else {
+        const g = S.invDraft.groups;
+        const ai = g.add.indexOf(name);
+        if (ai >= 0) g.add[ai] = n; else g.rename.push({ from: name, to: n });
+        saveDraft();
+      }
+      if (S.invOpen?.[name]) S.invOpen[n] = true;
+      closeSheet(); toast(isManager() ? 'Gruppo rinominato ✨' : 'Aggiunto alla bozza'); renderMagazzino();
+    });
+    $('#gDelete', root)?.addEventListener('click', async () => {
+      const mode = count ? $('input[name=gDel]:checked', root).value : 'all';
+      const moveTo = mode === 'move' ? $('#gMoveTo', root).value : null;
+      if (mode === 'move' && !moveTo) return toast('Crea prima un altro gruppo in cui spostare i prodotti');
+      const line = moveTo ? `I ${count} prodotti andranno in "${moveTo}"` : count ? `Verranno eliminati anche ${count} prodotti` : 'Gruppo vuoto';
+      if (isManager()) {
+        if (!(await secureConfirm({ title: `Eliminare il gruppo "${name}"?`, lines: [line], okLabel: 'Sì, elimina', danger: true, identity: isSub() }))) return;
+        try {
+          if (moveTo) { const { error } = await sb.rpc('move_product_group', { p_from: name, p_to: moveTo }); if (error) throw error; }
+          else if (count) { const { error } = await sb.from('products').delete().eq('group_name', name); if (error) throw error; }
+          const { error } = await sb.from('product_groups').delete().eq('name', name); if (error) throw error;
+          sb.rpc('log_group_event', { p_text: `eliminato gruppo "${name}"` }).then(() => {}, () => {});
+          await loadProducts();
+        } catch (err) { return fail(err); }
+      } else {
+        const g = S.invDraft.groups;
+        const ai = g.add.indexOf(name);
+        if (ai >= 0) g.add.splice(ai, 1); else g.delete.push({ name, moveTo });
+        saveDraft();
+      }
+      closeSheet(); toast(isManager() ? 'Gruppo eliminato' : 'Aggiunto alla bozza'); renderMagazzino();
     });
   });
 }
@@ -1800,6 +1930,14 @@ function describeChange(payload) {
 async function applyChange(payload) {
   if (payload.inventory) {
     const inv = payload.inventory;
+    const g = inv.groups || {};
+    for (const n of g.add || []) { const { error } = await sb.from('product_groups').insert({ name: n }); if (error && error.code !== '23505') throw error; }
+    for (const r of g.rename || []) { const { error } = await sb.rpc('rename_product_group', { p_old: r.from, p_new: r.to }); if (error) throw error; }
+    for (const x of g.delete || []) {
+      if (x.moveTo) { const { error } = await sb.rpc('move_product_group', { p_from: x.name, p_to: x.moveTo }); if (error) throw error; }
+      else { const { error } = await sb.from('products').delete().eq('group_name', x.name); if (error) throw error; }
+      const { error } = await sb.from('product_groups').delete().eq('name', x.name); if (error) throw error;
+    }
     for (const x of inv.add || []) { const { error } = await sb.from('products').insert(x); if (error) throw error; }
     for (const u of inv.update || []) { const { error } = await sb.from('products').update(u.after).eq('id', u.id); if (error) throw error; }
     for (const x of inv.delete || []) { const { error } = await sb.from('products').delete().eq('id', x.id); if (error) throw error; }
@@ -1869,7 +2007,7 @@ async function renderRequests(box) {
         return `<div class="req-item ${r.skip.has(k) ? 'off' : ''}" data-k="${k}">
           <label class="chk"><input type="checkbox" ${r.skip.has(k) ? '' : 'checked'}><span></span></label>
           <span class="req-text">${esc(l.text)}</span>
-          ${l.kind !== 'delete' ? `<button class="mini-btn" data-edit aria-label="Correggi">${ICON.edit}</button>` : ''}
+          ${l.kind === 'add' || l.kind === 'update' ? `<button class="mini-btn" data-edit aria-label="Correggi">${ICON.edit}</button>` : ''}
         </div>`;
       }).join('')}</div>
       <p class="note" style="margin:6px 0 10px">Togli la spunta per escludere una voce, oppure tocca la matita per correggerla.</p>`;
@@ -1900,7 +2038,11 @@ async function renderRequests(box) {
       });
       const final = () => {
         const w = JSON.parse(JSON.stringify(r.work));
-        if (w.inventory) ['add', 'update', 'delete'].forEach((kind) => { w.inventory[kind] = (w.inventory[kind] || []).filter((_, i) => !r.skip.has(`${kind}:${i}`)); });
+        if (w.inventory) {
+          ['add', 'update', 'delete'].forEach((kind) => { w.inventory[kind] = (w.inventory[kind] || []).filter((_, i) => !r.skip.has(`${kind}:${i}`)); });
+          const g = w.inventory.groups || {};
+          [['gadd', 'add'], ['grename', 'rename'], ['gdelete', 'delete']].forEach(([k, f]) => { g[f] = (g[f] || []).filter((_, i) => !r.skip.has(`${k}:${i}`)); });
+        }
         return w;
       };
       const decide = async (approve) => {
