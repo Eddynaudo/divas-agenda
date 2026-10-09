@@ -576,15 +576,17 @@ function openNewMemberSheet() {
 
 /* ───────── Navigazione ───────── */
 $$('.tabbar button').forEach((b) => b.addEventListener('click', () => setTab(b.dataset.tab)));
-$('#fab').addEventListener('click', () => openForm(null, { date: S.sel }));
+$('#fab').addEventListener('click', () => (S.tab === 'magazzino' ? openProductForm(null) : openForm(null, { date: S.sel })));
 $('#todayBtn').addEventListener('click', () => { S.sel = startOfDay(new Date()); setTab('agenda'); });
 
-function setTab(t) {
+function setTab(t, force) {
+  // dipendente che esce dal Magazzino con modifiche in bozza: "Sei sicuro?"
+  if (!force && S.tab === 'magazzino' && t !== 'magazzino' && !isAdmin() && draftCount()) { confirmLeaveMagazzino(t); return; }
   S.tab = t;
   $$('.tabbar button').forEach((b) => b.classList.toggle('active', b.dataset.tab === t));
   $('#fab').classList.toggle('hidden', t === 'impostazioni');
   scrollTo(0, 0);
-  ({ agenda: renderAgenda, clienti: renderClients, cassa: renderCassa, impostazioni: renderSettings })[t]();
+  ({ agenda: renderAgenda, clienti: renderClients, cassa: renderCassa, magazzino: renderMagazzino, impostazioni: renderSettings })[t]();
 }
 function setTop(eyebrow, title) { $('#topEyebrow').textContent = eyebrow; $('#topTitle').textContent = title; }
 
@@ -1495,6 +1497,268 @@ async function openActivityArchive() {
   });
 }
 
+
+/* ───────── Magazzino ───────── */
+const INV_FIELDS = ['name', 'group_name', 'specs', 'size', 'price', 'stock', 'image_path'];
+const INV_LABELS = { name: 'nome', group_name: 'gruppo', specs: 'specifiche', size: 'formato', price: 'prezzo', stock: 'pezzi', image_path: 'foto' };
+const productImg = (path) => (path ? `${SUPABASE_URL}/storage/v1/object/public/products/${path}` : '');
+function subgroupOf(p) {
+  const parts = String(p.specs || '').split(' · ');
+  if (/^Linea /.test(parts[parts.length - 1] || '')) return parts[parts.length - 1].replace(/^Linea /, '');
+  if (parts.length > 1 && !/Cod\./.test(parts[0]) && parts[0].length < 24 && p.group_name === 'Balmain Paris') return parts[0];
+  return '';
+}
+const invKey = () => `divas-inv-draft-${S.user?.id}`;
+function loadDraft() {
+  try { S.invDraft = JSON.parse(localStorage.getItem(invKey()) || 'null'); } catch { S.invDraft = null; }
+  if (!S.invDraft) S.invDraft = { add: [], update: {}, delete: {} };
+}
+function saveDraft() { try { localStorage.setItem(invKey(), JSON.stringify(S.invDraft)); } catch {} }
+const draftCount = () => S.invDraft ? S.invDraft.add.length + Object.keys(S.invDraft.update).length + Object.keys(S.invDraft.delete).length : 0;
+function clearDraft() { S.invDraft = { add: [], update: {}, delete: {} }; saveDraft(); }
+
+function draftPayload() {
+  const d = S.invDraft;
+  return {
+    inventory: {
+      add: d.add.map(({ tmpId, ...x }) => x),
+      update: Object.entries(d.update).map(([id, u]) => ({ id, before: u.before, after: u.after })),
+      delete: Object.entries(d.delete).map(([id, x]) => ({ id, name: x.name, size: x.size })),
+    },
+  };
+}
+function productLabel(p) { return `${p.name}${p.size ? ' (' + p.size + ')' : ''}`; }
+function inventoryLines(inv) {
+  const out = [];
+  (inv.add || []).forEach((x, i) => out.push({ kind: 'add', i, text: `Nuovo prodotto: ${productLabel(x)}${x.price != null ? ' · ' + eur(x.price) : ''}${x.group_name ? ' · ' + x.group_name : ''}` }));
+  (inv.update || []).forEach((u, i) => {
+    const bits = INV_FIELDS.filter((f) => String(u.before?.[f] ?? '') !== String(u.after?.[f] ?? '')).map((f) => {
+      if (f === 'price') return `prezzo ${eur(u.before?.price)} → ${eur(u.after?.price)}`;
+      if (f === 'stock') return `pezzi ${u.before?.stock ?? '—'} → ${u.after?.stock ?? '—'}`;
+      if (f === 'name') return `nome "${u.before?.name}" → "${u.after?.name}"`;
+      if (f === 'size') return `formato ${u.before?.size || '—'} → ${u.after?.size || '—'}`;
+      return INV_LABELS[f];
+    });
+    out.push({ kind: 'update', i, text: `${productLabel(u.before || u.after)}: ${bits.join(', ') || 'nessuna modifica'}` });
+  });
+  (inv.delete || []).forEach((x, i) => out.push({ kind: 'delete', i, text: `Elimina: ${productLabel(x)}` }));
+  return out;
+}
+
+async function loadProducts() {
+  const { data, error } = await sb.from('products').select('*').order('group_name').order('name').order('sort');
+  if (error) { fail(error); return; }
+  S.products = data || [];
+}
+
+async function renderMagazzino() {
+  setTop('Inventario', 'Magazzino');
+  if (!S.invDraft) loadDraft();
+  const view = $('#view');
+  if (!S.products) { view.innerHTML = '<div class="muted">Caricamento…</div>'; await loadProducts(); }
+  if (S.tab !== 'magazzino') return;
+  const q = (S.invQuery || '').toLowerCase().trim();
+  const d = S.invDraft;
+  // elenco effettivo: prodotti + bozza del dipendente
+  let items = (S.products || []).map((p) => {
+    const up = d.update[p.id];
+    return { ...p, ...(up ? up.after : {}), _state: d.delete[p.id] ? 'delete' : up ? 'update' : '' };
+  });
+  items = items.concat(d.add.map((x) => ({ ...x, id: x.tmpId, _state: 'add' })));
+  const match = (p) => !q || [p.name, p.specs, p.size, p.group_name].some((v) => String(v || '').toLowerCase().includes(q));
+  items = items.filter(match);
+  const mode = S.invView || 'groups';
+
+  const row = (p) => {
+    const img = productImg(p.image_path);
+    const badge = p._state === 'add' ? '<span class="badge info">Nuovo · in attesa</span>' : p._state === 'update' ? '<span class="badge warn">Modificato · in attesa</span>' : p._state === 'delete' ? '<span class="badge danger">Da eliminare · in attesa</span>' : '';
+    return `<button class="prod glass ${p._state === 'delete' ? 'del' : ''}" data-id="${p.id}">
+      <span class="prod-img">${img ? `<img src="${img}" alt="" loading="lazy">` : `<i>${esc(initials(p.name))}</i>`}</span>
+      <span class="prod-info"><strong>${esc(p.name)}</strong>
+        <small>${esc([p.size, p.specs].filter(Boolean).join(' · '))}</small>
+        <span class="chips" style="margin-top:4px">${p.stock != null ? `<span class="chip">${p.stock} pz</span>` : ''}${badge}</span></span>
+      <span class="prod-price">${p.price != null ? eur(p.price) : ''}</span>
+    </button>`;
+  };
+
+  let body;
+  if (!items.length) {
+    body = `<div class="empty glass"><div class="spark">✦</div><div class="serif">${q ? 'Nessun prodotto trovato' : 'Magazzino vuoto'}</div><div class="muted">Tocca + per aggiungere un prodotto</div></div>`;
+  } else if (mode === 'list') {
+    body = `<div class="list">${items.sort((a, b) => a.name.localeCompare(b.name, 'it')).map(row).join('')}</div>`;
+  } else {
+    const groups = {};
+    items.forEach((p) => { const g = p.group_name || 'Altro'; (groups[g] ||= {})[subgroupOf(p) || ''] ||= []; groups[g][subgroupOf(p) || ''].push(p); });
+    S.invOpen ||= {};
+    body = Object.keys(groups).sort((a, b) => a.localeCompare(b, 'it')).map((g) => {
+      const subs = groups[g];
+      const n = Object.values(subs).reduce((s, l) => s + l.length, 0);
+      const open = q || S.invOpen[g];
+      return `<section class="inv-group glass ${open ? 'open' : ''}" data-g="${esc(g)}">
+        <button class="inv-head"><span><strong>${esc(g)}</strong><small>${n} prodotti</small></span><span class="chev">${ICON.right}</span></button>
+        <div class="inv-body">${Object.keys(subs).sort().map((sg) => `${sg ? `<div class="section-t" style="margin:12px 4px 8px">${esc(sg)}</div>` : ''}<div class="list">${subs[sg].sort((a, b) => a.name.localeCompare(b.name, 'it')).map(row).join('')}</div>`).join('')}</div>
+      </section>`;
+    }).join('');
+  }
+
+  const total = (S.products || []).length;
+  view.innerHTML = `
+    <input class="search" type="search" id="invQ" placeholder="Cerca prodotto, formato, linea…" value="${esc(S.invQuery || '')}">
+    <div class="seg view-switch">
+      <button data-v="groups" class="${mode === 'groups' ? 'on' : ''}">Per gruppo</button>
+      <button data-v="list" class="${mode === 'list' ? 'on' : ''}">Elenco</button>
+    </div>
+    <p class="note" style="margin:0 2px 10px">${total} prodotti in magazzino${!isAdmin() ? ' · le tue modifiche vanno approvate da Eriola' : ''}</p>
+    ${body}
+    ${!isAdmin() && draftCount() ? `<div class="draft-bar glass"><span><strong>${draftCount()} ${draftCount() === 1 ? 'modifica' : 'modifiche'} in bozza</strong><small>Non ancora inviate all'amministratrice</small></span><button class="btn gold" id="sendDraft">Invia</button></div>` : ''}`;
+
+  const qi = $('#invQ');
+  qi.addEventListener('input', () => { S.invQuery = qi.value; clearTimeout(S._invT); S._invT = setTimeout(() => { renderMagazzino().then(() => { const n = $('#invQ'); n.focus(); n.setSelectionRange(n.value.length, n.value.length); }); }, 250); });
+  $$('.view-switch button', view).forEach((b) => b.addEventListener('click', () => { S.invView = b.dataset.v; renderMagazzino(); }));
+  $$('.inv-head', view).forEach((h) => h.addEventListener('click', () => {
+    const sec = h.closest('.inv-group'); sec.classList.toggle('open'); S.invOpen[sec.dataset.g] = sec.classList.contains('open');
+  }));
+  $$('.prod', view).forEach((b) => b.addEventListener('click', () => {
+    const id = b.dataset.id;
+    const p = items.find((x) => String(x.id) === id);
+    openProductForm(p);
+  }));
+  $('#sendDraft')?.addEventListener('click', () => confirmLeaveMagazzino(null, true));
+}
+
+function openProductForm(p, opts = {}) {
+  const isNew = !p;
+  const admin = isAdmin();
+  const review = !!opts.onReview; // l'admin modifica una proposta prima di approvarla
+  const v = p ? { ...p } : { name: '', group_name: S.invLastGroup || (S.products?.[0]?.group_name || ''), specs: '', size: '', price: null, stock: null, image_path: null };
+  const groups = [...new Set((S.products || []).map((x) => x.group_name).filter(Boolean))].sort();
+  let newImage = v.image_path;
+  openSheet(`
+    ${sheetHead(review ? 'Modifica proposta' : isNew ? 'Nuovo prodotto' : 'Prodotto', review ? 'Correggi i valori prima di approvare' : admin ? '' : 'Le modifiche verranno inviate a Eriola per l\'approvazione')}
+    <form class="form" id="pForm" autocomplete="off">
+      <div class="prod-photo">
+        <span class="prod-img big" id="pImg">${newImage ? `<img src="${productImg(newImage)}" alt="">` : `<i>${esc(initials(v.name || '?'))}</i>`}</span>
+        <div style="display:flex;flex-direction:column;gap:8px;flex:1">
+          <label class="btn" style="flex-direction:row;color:var(--text);font-size:15px">${ICON.camera} ${newImage ? 'Cambia foto' : 'Aggiungi foto'}<input type="file" accept="image/*" id="pFile" hidden></label>
+          ${newImage ? '<button type="button" class="btn ghost" id="pNoImg">Rimuovi foto</button>' : ''}
+        </div>
+      </div>
+      <label>Nome prodotto<input id="pName" required value="${esc(v.name)}"></label>
+      <label>Gruppo / marca<input id="pGroup" list="pGroups" value="${esc(v.group_name || '')}" placeholder="Es. Balmain Paris"></label>
+      <datalist id="pGroups">${groups.map((g) => `<option value="${esc(g)}">`).join('')}</datalist>
+      <label>Specifiche<textarea id="pSpecs" rows="3" placeholder="Linea, descrizione, codice…">${esc(v.specs || '')}</textarea></label>
+      <div class="row3">
+        <label>Formato (ml)<input id="pSize" value="${esc(v.size || '')}" placeholder="250 ml"></label>
+        <label>Prezzo €<input id="pPrice" type="number" step="0.01" min="0" inputmode="decimal" value="${v.price ?? ''}"></label>
+        <label>Pezzi<input id="pStock" type="number" step="1" min="0" inputmode="numeric" value="${v.stock ?? ''}" placeholder="—"></label>
+      </div>
+      <button class="btn gold block" id="pSave">${review ? 'Applica alla proposta' : admin ? 'Salva prodotto' : 'Salva nella bozza'}</button>
+      ${!isNew && !review ? `<button type="button" class="btn danger block" id="pDel">${ICON.trash} ${p._state === 'delete' ? 'Annulla eliminazione' : 'Elimina prodotto'}</button>` : ''}
+      ${!admin && p?._state ? '<button type="button" class="btn ghost block" id="pUndo">Annulla la mia modifica</button>' : ''}
+    </form>`, (root) => {
+    $('#pFile', root).addEventListener('change', async (e) => {
+      const f = e.target.files[0]; if (!f) return;
+      toast('Carico la foto…');
+      const blob = await compressImage(f, 900, 0.85);
+      const path = `${crypto.randomUUID()}.jpg`;
+      const { error } = await sb.storage.from('products').upload(path, blob, { contentType: 'image/jpeg' });
+      if (error) return fail(error);
+      newImage = path;
+      $('#pImg', root).innerHTML = `<img src="${productImg(path)}" alt="">`;
+      toast('Foto pronta: ricordati di salvare');
+    });
+    $('#pNoImg', root)?.addEventListener('click', () => { newImage = null; $('#pImg', root).innerHTML = `<i>${esc(initials(v.name || '?'))}</i>`; });
+    const read = () => ({
+      name: $('#pName', root).value.trim(),
+      group_name: $('#pGroup', root).value.trim() || 'Altro',
+      specs: $('#pSpecs', root).value.trim() || null,
+      size: $('#pSize', root).value.trim() || null,
+      price: $('#pPrice', root).value === '' ? null : Number($('#pPrice', root).value),
+      stock: $('#pStock', root).value === '' ? null : parseInt($('#pStock', root).value, 10),
+      image_path: newImage || null,
+    });
+    $('#pForm', root).addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const after = read();
+      if (!after.name) return toast('Scrivi il nome del prodotto');
+      S.invLastGroup = after.group_name;
+      if (review) { opts.onReview(after); closeSheet(); return; }
+      if (admin) {
+        if (!(await secureConfirm({ title: isNew ? 'Aggiungere il prodotto?' : 'Salvare le modifiche?', lines: [productLabel(after)], okLabel: 'Sì, salva', identity: false }))) return;
+        const r = isNew ? await sb.from('products').insert(after) : await sb.from('products').update(after).eq('id', p.id);
+        if (r.error) return fail(r.error);
+        await loadProducts(); closeSheet(); toast('Magazzino aggiornato ✨'); renderMagazzino();
+        return;
+      }
+      // dipendente: bozza
+      const d = S.invDraft;
+      if (isNew) d.add.push({ tmpId: 'new-' + crypto.randomUUID(), ...after });
+      else if (p._state === 'add') Object.assign(d.add.find((x) => x.tmpId === p.id), after);
+      else {
+        const orig = S.products.find((x) => x.id === p.id);
+        const before = Object.fromEntries(INV_FIELDS.map((f) => [f, orig[f] ?? null]));
+        const changed = INV_FIELDS.some((f) => String(before[f] ?? '') !== String(after[f] ?? ''));
+        if (changed) d.update[p.id] = { before, after }; else delete d.update[p.id];
+      }
+      saveDraft(); closeSheet(); toast('Aggiunto alla bozza: invia quando hai finito'); renderMagazzino();
+    });
+    $('#pDel', root)?.addEventListener('click', async () => {
+      if (admin) {
+        if (!(await secureConfirm({ title: 'Eliminare il prodotto?', lines: [productLabel(p)], okLabel: 'Sì, elimina', danger: true, identity: false }))) return;
+        const { error } = await sb.from('products').delete().eq('id', p.id);
+        if (error) return fail(error);
+        await loadProducts(); closeSheet(); toast('Prodotto eliminato'); renderMagazzino();
+        return;
+      }
+      const d = S.invDraft;
+      if (p._state === 'add') d.add = d.add.filter((x) => x.tmpId !== p.id);
+      else if (p._state === 'delete') delete d.delete[p.id];
+      else { d.delete[p.id] = { name: p.name, size: p.size }; delete d.update[p.id]; }
+      saveDraft(); closeSheet(); renderMagazzino();
+    });
+    $('#pUndo', root)?.addEventListener('click', () => {
+      const d = S.invDraft;
+      if (p._state === 'add') d.add = d.add.filter((x) => x.tmpId !== p.id);
+      delete d.update[p.id]; delete d.delete[p.id];
+      saveDraft(); closeSheet(); renderMagazzino();
+    });
+  });
+}
+
+// "Sei sicuro?" prima di uscire dal Magazzino (dipendenti con modifiche in bozza)
+function confirmLeaveMagazzino(nextTab, fromButton) {
+  const lines = inventoryLines(draftPayload().inventory).map((l) => l.text);
+  return new Promise((resolve) => {
+    const box = document.createElement('div');
+    box.className = 'confirm-backdrop';
+    box.innerHTML = `
+      <div class="confirm-card glass" role="alertdialog" aria-modal="true">
+        <h2>Sei sicuro di aver finito?</h2>
+        <p class="note" style="text-align:center;margin:0 0 10px">Queste modifiche al magazzino verranno inviate a Eriola, che le approva o le corregge.</p>
+        <ul class="sc-list">${lines.map((l) => `<li>${esc(l)}</li>`).join('')}</ul>
+        <button class="btn gold block" data-send>Sì, invia a Eriola${fromButton ? '' : ' ed esci'}</button>
+        <button class="btn block" data-stay style="margin-top:8px">Continua a modificare</button>
+        <button class="btn ghost block" data-drop style="margin-top:8px;color:var(--danger)">Scarta le modifiche</button>
+      </div>`;
+    document.body.appendChild(box);
+    const done = (v) => { box.remove(); resolve(v); };
+    $('[data-stay]', box).addEventListener('click', () => done(false));
+    $('[data-drop]', box).addEventListener('click', () => {
+      if (!confirm('Scartare tutte le modifiche in bozza?')) return;
+      clearDraft(); done(true); if (nextTab) setTab(nextTab, true); else renderMagazzino();
+    });
+    $('[data-send]', box).addEventListener('click', async (e) => {
+      e.currentTarget.disabled = true;
+      const payload = draftPayload();
+      const n = lines.length;
+      const { error } = await sb.from('change_requests').insert({ payload, summary: `Magazzino: ${n} ${n === 1 ? 'modifica' : 'modifiche'} (${lines.slice(0, 2).join('; ')}${n > 2 ? '…' : ''})` });
+      if (error) { e.currentTarget.disabled = false; return fail(error); }
+      clearDraft(); toast('Modifiche inviate a Eriola 🛎️'); done(true);
+      if (nextTab) setTab(nextTab, true); else renderMagazzino();
+    });
+  });
+}
+
 /* ───────── Impostazioni ───────── */
 const SETTING_LABELS = {
   staff_r1: 'Promemoria operatrice 1', staff_r2: 'Promemoria operatrice 2', client_r1: 'Promemoria cliente 1', client_r2: 'Promemoria cliente 2',
@@ -1510,6 +1774,7 @@ function settingValueLabel(k, v) {
 // righe leggibili che descrivono una richiesta/modifica
 function describeChange(payload) {
   const out = [];
+  if (payload.inventory) out.push(...inventoryLines(payload.inventory).map((l) => l.text));
   Object.entries(payload.settings || {}).forEach(([k, v]) => out.push(`${SETTING_LABELS[k] || k}: ${settingValueLabel(k, v)}`));
   const sv = payload.services || {};
   (sv.update || []).forEach((u) => {
@@ -1524,6 +1789,13 @@ function describeChange(payload) {
   return out;
 }
 async function applyChange(payload) {
+  if (payload.inventory) {
+    const inv = payload.inventory;
+    for (const x of inv.add || []) { const { error } = await sb.from('products').insert(x); if (error) throw error; }
+    for (const u of inv.update || []) { const { error } = await sb.from('products').update(u.after).eq('id', u.id); if (error) throw error; }
+    for (const x of inv.delete || []) { const { error } = await sb.from('products').delete().eq('id', x.id); if (error) throw error; }
+    S.products = null;
+  }
   if (payload.settings && Object.keys(payload.settings).length) {
     const { error } = await sb.from('settings').update({ ...payload.settings, updated_at: new Date().toISOString() }).eq('user_id', S.settings.user_id);
     if (error) throw error;
@@ -1577,30 +1849,70 @@ async function renderRequests(box) {
   }
   box.closest('.card')?.classList.remove('hidden');
   const when = (d) => new Date(d).toLocaleString('it-IT', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
-  box.innerHTML = data.map((r) => `
-    <div class="req" data-id="${r.id}">
-      <div class="who-line"><strong>${esc(isAdmin() ? memberName(r.requested_by) || 'Dipendente' : 'La tua richiesta')}</strong>
-        <span class="muted">${when(r.created_at)}</span></div>
-      <ul>${describeChange(r.payload).map((l) => `<li>${esc(l)}</li>`).join('')}</ul>
-      ${isAdmin() ? `<div class="actions"><button class="btn ok" data-ok>${ICON.check} Approva</button><button class="btn danger" data-no>Rifiuta</button></div>`
-        : `<span class="badge ${r.status === 'approved' ? 'ok' : r.status === 'rejected' ? 'danger' : 'warn'}">${r.status === 'approved' ? 'Approvata' : r.status === 'rejected' ? 'Non approvata' : 'In attesa'}</span>`}
-    </div>`).join('');
-  if (!isAdmin()) return;
-  $$('.req', box).forEach((el) => {
-    const r = data.find((x) => x.id === el.dataset.id);
-    const decide = async (approve) => {
-      if (!(await secureConfirm({ title: `${approve ? 'Approvare' : 'Rifiutare'} la richiesta di ${memberName(r.requested_by) || 'un dipendente'}?`, lines: describeChange(r.payload), okLabel: approve ? 'Approva' : 'Rifiuta', danger: !approve }))) return;
-      try {
-        if (approve) await applyChange(r.payload);
-        const { error } = await sb.from('change_requests').update({ status: approve ? 'approved' : 'rejected', decided_by: S.user.id, decided_at: new Date().toISOString() }).eq('id', r.id);
-        if (error) throw error;
-        toast(approve ? 'Richiesta approvata e applicata ✓' : 'Richiesta rifiutata');
-        renderSettings();
-      } catch (e) { fail(e); }
-    };
-    $('[data-ok]', el).addEventListener('click', () => decide(true));
-    $('[data-no]', el).addEventListener('click', () => decide(false));
-  });
+  // copia di lavoro: l'admin può togliere voci o correggerle prima di approvare
+  data.forEach((r) => { r.work = JSON.parse(JSON.stringify(r.payload)); r.skip = new Set(); });
+  const itemsHtml = (r) => {
+    if (!isAdmin() || !r.work.inventory) return `<ul>${describeChange(r.work).map((l) => `<li>${esc(l)}</li>`).join('')}</ul>`;
+    const other = describeChange({ ...r.work, inventory: undefined });
+    return `${other.length ? `<ul>${other.map((l) => `<li>${esc(l)}</li>`).join('')}</ul>` : ''}
+      <div class="req-items">${inventoryLines(r.work.inventory).map((l) => {
+        const k = `${l.kind}:${l.i}`;
+        return `<div class="req-item ${r.skip.has(k) ? 'off' : ''}" data-k="${k}">
+          <label class="chk"><input type="checkbox" ${r.skip.has(k) ? '' : 'checked'}><span></span></label>
+          <span class="req-text">${esc(l.text)}</span>
+          ${l.kind !== 'delete' ? `<button class="mini-btn" data-edit aria-label="Correggi">${ICON.edit}</button>` : ''}
+        </div>`;
+      }).join('')}</div>
+      <p class="note" style="margin:6px 0 10px">Togli la spunta per escludere una voce, oppure tocca la matita per correggerla.</p>`;
+  };
+  const draw = () => {
+    box.innerHTML = data.map((r) => `
+      <div class="req" data-id="${r.id}">
+        <div class="who-line"><strong>${esc(isAdmin() ? memberName(r.requested_by) || 'Dipendente' : 'La tua richiesta')}</strong>
+          <span class="muted">${when(r.created_at)}</span></div>
+        ${itemsHtml(r)}
+        ${isAdmin() ? `<div class="actions"><button class="btn ok" data-ok>${ICON.check} Approva</button><button class="btn danger" data-no>Rifiuta</button></div>`
+          : `<span class="badge ${r.status === 'approved' ? 'ok' : r.status === 'rejected' ? 'danger' : 'warn'}">${r.status === 'approved' ? 'Approvata' : r.status === 'rejected' ? 'Non approvata' : 'In attesa'}</span>`}
+      </div>`).join('');
+    if (!isAdmin()) return;
+    $$('.req', box).forEach((el) => {
+      const r = data.find((x) => x.id === el.dataset.id);
+      $$('.req-item', el).forEach((it) => {
+        const k = it.dataset.k;
+        $('input', it).addEventListener('change', (e) => { e.target.checked ? r.skip.delete(k) : r.skip.add(k); it.classList.toggle('off', !e.target.checked); });
+        $('[data-edit]', it)?.addEventListener('click', () => {
+          const [kind, i] = k.split(':'); const inv = r.work.inventory;
+          const cur = kind === 'add' ? inv.add[+i] : inv.update[+i].after;
+          openProductForm({ ...cur, id: kind === 'add' ? 'new-review' : inv.update[+i].id, _state: kind }, {
+            onReview: (after) => { if (kind === 'add') inv.add[+i] = after; else inv.update[+i].after = after; toast('Proposta corretta: ora puoi approvare'); draw(); },
+          });
+        });
+      });
+      const final = () => {
+        const w = JSON.parse(JSON.stringify(r.work));
+        if (w.inventory) ['add', 'update', 'delete'].forEach((kind) => { w.inventory[kind] = (w.inventory[kind] || []).filter((_, i) => !r.skip.has(`${kind}:${i}`)); });
+        return w;
+      };
+      const decide = async (approve) => {
+        const pay = final();
+        const lines = describeChange(pay);
+        if (approve && !lines.length) return toast('Nessuna voce selezionata: usa "Rifiuta"');
+        if (!(await secureConfirm({ title: `${approve ? 'Approvare' : 'Rifiutare'} la richiesta di ${memberName(r.requested_by) || 'un dipendente'}?`, lines: approve ? lines : describeChange(r.payload), okLabel: approve ? 'Approva' : 'Rifiuta', danger: !approve }))) return;
+        try {
+          if (approve) await applyChange(pay);
+          const upd = { status: approve ? 'approved' : 'rejected', decided_by: S.user.id, decided_at: new Date().toISOString() };
+          if (approve && JSON.stringify(pay) !== JSON.stringify(r.payload)) { upd.payload = pay; upd.summary = (r.summary || '') + ' (approvata con correzioni)'; }
+          const { error } = await sb.from('change_requests').update(upd).eq('id', r.id);
+          if (error) throw error;
+          toast(approve ? 'Richiesta approvata e applicata ✓' : 'Richiesta rifiutata');
+          renderSettings();
+        } catch (e) { fail(e); }
+      };
+      $('[data-ok]', el).addEventListener('click', () => decide(true));
+      $('[data-no]', el).addEventListener('click', () => decide(false));
+    });
+  };
+  draw();
 }
 
 async function renderSettings() {
