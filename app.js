@@ -394,21 +394,21 @@ function openPasswordSheet(fromRecovery) {
 
 
 /* ───────── Conferma di sicurezza (Face ID / impronta o password) ───────── */
-function secureConfirm({ title, lines = [], okLabel = 'Conferma', danger = false }) {
+function secureConfirm({ title, lines = [], okLabel = 'Conferma', danger = false, identity = true }) {
   return new Promise((resolve) => {
-    const useBio = S.user && bio.enabledFor(S.user.id);
+    const useBio = identity && S.user && bio.enabledFor(S.user.id);
     const box = document.createElement('div');
     box.className = 'confirm-backdrop';
     box.innerHTML = `
       <div class="confirm-card glass" role="alertdialog" aria-modal="true" aria-labelledby="scTitle">
-        <div class="bio-icon" style="width:58px;height:58px;margin:0 auto 10px" aria-hidden="true">
+        ${identity ? `<div class="bio-icon" style="width:58px;height:58px;margin:0 auto 10px" aria-hidden="true">
           <svg viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="10" rx="2.5"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5M12 14.5v2.5"/></svg>
-        </div>
+        </div>` : ''}
         <h2 id="scTitle">${esc(title)}</h2>
         ${lines.length ? `<ul class="sc-list">${lines.map((l) => `<li>${esc(l)}</li>`).join('')}</ul>` : ''}
-        <p class="note" style="margin:0 0 10px;text-align:center">Per sicurezza conferma la tua identità.</p>
+        ${identity ? '<p class="note" style="margin:0 0 10px;text-align:center">Per sicurezza conferma la tua identità.</p>' : ''}
         <form id="scForm" class="form" style="gap:10px">
-          <label class="${useBio ? 'hidden' : ''}" id="scPwdWrap">Password<input type="password" id="scPwd" autocomplete="current-password"></label>
+          <label class="${useBio || !identity ? 'hidden' : ''}" id="scPwdWrap">Password<input type="password" id="scPwd" autocomplete="current-password"></label>
           <p class="auth-msg" id="scMsg" style="margin:0"></p>
           <button class="btn ${danger ? 'danger' : 'gold'} block" id="scOk" type="submit">${useBio ? 'Conferma con Face ID / impronta' : esc(okLabel)}</button>
           ${useBio ? '<button type="button" class="link" id="scUsePwd" style="text-align:center">Usa la password</button>' : ''}
@@ -417,7 +417,7 @@ function secureConfirm({ title, lines = [], okLabel = 'Conferma', danger = false
       </div>`;
     document.body.appendChild(box);
     addEyes(box);
-    let mode = useBio ? 'bio' : 'pwd';
+    let mode = !identity ? 'none' : useBio ? 'bio' : 'pwd';
     const done = (v) => { box.remove(); resolve(v); };
     $('#scCancel', box).addEventListener('click', () => done(false));
     $('#scUsePwd', box)?.addEventListener('click', () => {
@@ -425,11 +425,14 @@ function secureConfirm({ title, lines = [], okLabel = 'Conferma', danger = false
       $('#scOk', box).textContent = okLabel; $('#scPwd', box).focus();
     });
     if (mode === 'pwd') setTimeout(() => $('#scPwd', box).focus(), 50);
+    $('#scCancel', box).textContent = identity ? 'Annulla' : 'No, annulla';
     $('#scForm', box).addEventListener('submit', async (e) => {
       e.preventDefault();
       const btn = $('#scOk', box); btn.disabled = true; $('#scMsg', box).textContent = '';
       try {
-        if (mode === 'bio') {
+        if (mode === 'none') {
+          // semplice conferma sì/no
+        } else if (mode === 'bio') {
           await bio.verify();
         } else {
           const pwd = $('#scPwd', box).value;
@@ -487,7 +490,7 @@ function openMemberSheet(u) {
       <p class="note">Gli appuntamenti creati da questo account restano in agenda.</p>
     </div>`, (root) => {
     const run = async (btn, fn, ok, title, danger) => {
-      if (!(await secureConfirm({ title, lines: [`${u.full_name || u.email} (${u.email})`], okLabel: 'Conferma', danger }))) return;
+      if (!(await secureConfirm({ title, lines: [`${u.full_name || u.email} (${u.email})`], okLabel: 'Sì, conferma', danger, identity: false }))) return;
       btn.disabled = true;
       try { await fn(); toast(ok); closeSheet(); await loadTeam(); renderSettings(); }
       catch (e) { toast('⚠️ ' + e.message); } finally { btn.disabled = false; }
@@ -514,7 +517,7 @@ function openNewMemberSheet() {
     $('#nmPwd', root).value = Math.random().toString(36).slice(2, 6) + '-' + Math.random().toString(36).slice(2, 6) + '!' ;
     $('#nmForm', root).addEventListener('submit', async (e) => {
       e.preventDefault();
-      if (!(await secureConfirm({ title: 'Creare il nuovo account?', lines: [`${$('#nmName', root).value} · ${$('#nmEmail', root).value}`], okLabel: 'Crea account' }))) return;
+      if (!(await secureConfirm({ title: 'Creare il nuovo account?', lines: [`${$('#nmName', root).value} · ${$('#nmEmail', root).value}`], okLabel: 'Sì, crea', identity: false }))) return;
       const btn = $('#nmSave', root); btn.disabled = true;
       try {
         await adminCall('create', { full_name: $('#nmName', root).value, email: $('#nmEmail', root).value, password: $('#nmPwd', root).value });
@@ -1012,7 +1015,7 @@ async function openDetail(id) {
       <div class="detail-time"><b>${hm(d)}</b><small>${esc(d.toLocaleDateString('it-IT', { weekday: 'short', day: 'numeric', month: 'short' }))}</small></div>
       <div style="flex:1;display:flex;flex-direction:column;gap:8px">
         <div class="chips" style="margin:0">${statusBadges(a) || '<span class="badge info">In programma</span>'}</div>
-        <div style="font-size:26px;font-family:Marcellus,serif">${a.price != null ? eur(a.price) : '<span class="muted" style="font-size:16px">Prezzo da definire</span>'}</div>
+        <div style="font-size:26px;font-family:'Playfair Display',Georgia,serif;font-weight:700">${a.price != null ? eur(a.price) : '<span class="muted" style="font-size:16px">Prezzo da definire</span>'}</div>
         ${phone ? `<div style="display:flex;gap:8px">
           <a class="mini-btn" href="tel:${phone}" aria-label="Chiama">${ICON.phone}</a>
           <a class="mini-btn" href="https://wa.me/${phone.replace('+', '')}" target="_blank" rel="noopener" aria-label="WhatsApp">${ICON.chat}</a>
@@ -1329,7 +1332,7 @@ async function submitChange(payload) {
   if (!lines.length) { toast('Nessuna modifica da salvare'); return false; }
   const list = lines.map((l) => '• ' + l).join('\n');
   if (isAdmin()) {
-    if (!(await secureConfirm({ title: 'Confermi queste modifiche?', lines, okLabel: 'Conferma e salva' }))) return false;
+    if (!(await secureConfirm({ title: 'Confermi queste modifiche?', lines, okLabel: 'Sì, salva', identity: false }))) return false;
     await applyChange(payload);
     toast('Modifiche salvate ✨');
   } else {
@@ -1464,7 +1467,7 @@ async function renderSettings() {
       try { await bio.enable(); toast('Face ID / impronta attivati ✨'); }
       catch { e.target.checked = false; toast('Attivazione annullata'); }
     } else {
-      if (isAdmin() && !(await secureConfirm({ title: 'Disattivare Face ID / impronta su questo telefono?', okLabel: 'Disattiva', danger: true }))) { e.target.checked = true; return; }
+      if (isAdmin() && !(await secureConfirm({ title: 'Disattivare Face ID / impronta su questo telefono?', okLabel: 'Sì, disattiva', danger: true, identity: false }))) { e.target.checked = true; return; }
       bio.write(null); toast('Accesso biometrico disattivato');
     }
     renderSettings();

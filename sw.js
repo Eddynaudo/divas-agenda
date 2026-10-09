@@ -1,5 +1,5 @@
 // Diva's Agenda — Service Worker
-const CACHE = 'divas-v4';
+const CACHE = 'divas-v5';
 const SHELL = [
   './', './index.html', './styles.css', './app.js', './manifest.webmanifest',
   './vendor/supabase.js', './img/logo.png', './img/sky.jpg',
