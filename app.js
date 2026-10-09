@@ -1983,16 +1983,18 @@ async function renderSettings() {
 
     <div class="card glass form">
       <h3>Promemoria e messaggi</h3>
-      ${admin ? '' : '<p class="pending-note">Puoi proporre modifiche: verranno inviate all\'amministratrice, che riceve una notifica e decide se approvarle.</p>'}
+      ${admin ? '' : '<p class="pending-note">Per i promemoria dell\'operatrice e la durata puoi proporre modifiche: verranno inviate all\'amministratrice, che decide se approvarle.</p>'}
       <label>🔔 Per l'operatrice<div class="row"><select id="dS1">${opt(STAFF_OPTS, st.staff_r1)}</select><select id="dS2">${opt(STAFF_OPTS, st.staff_r2)}</select></div></label>
-      <label>💬 Per la cliente<div class="row"><select id="dC1">${opt(CLIENT_OPTS, st.client_r1)}</select><select id="dC2">${opt(CLIENT_OPTS, st.client_r2)}</select></div></label>
-      <div class="row">
-        <label>Canale predefinito<select id="dCh"><option value="whatsapp" ${st.default_channel === 'whatsapp' ? 'selected' : ''}>WhatsApp</option><option value="sms" ${st.default_channel === 'sms' ? 'selected' : ''}>SMS</option><option value="nessuno" ${st.default_channel === 'nessuno' ? 'selected' : ''}>Nessuno</option></select></label>
-        <label>Durata predefinita<select id="dDur">${DURATIONS.map((m) => `<option value="${m}" ${m === st.default_duration ? 'selected' : ''}>${durLabel(m)}</option>`).join('')}</select></label>
+      <label>Durata predefinita<select id="dDur">${DURATIONS.map((m) => `<option value="${m}" ${m === st.default_duration ? 'selected' : ''}>${durLabel(m)}</option>`).join('')}</select></label>
+      <div class="msg-lock ${admin ? '' : 'locked'}">
+        <div class="section-t" style="margin:4px 0 2px">💬 Messaggi alle clienti</div>
+        ${admin ? '' : '<p class="note" style="margin:0">🔒 Solo l\'amministrazione può modificare promemoria clienti, numero del salone e testo del messaggio.</p>'}
+        <label>Promemoria per la cliente<div class="row"><select id="dC1" ${admin ? '' : 'disabled'}>${opt(CLIENT_OPTS, st.client_r1)}</select><select id="dC2" ${admin ? '' : 'disabled'}>${opt(CLIENT_OPTS, st.client_r2)}</select></div></label>
+        <label>Canale predefinito<select id="dCh" ${admin ? '' : 'disabled'}><option value="whatsapp" ${st.default_channel === 'whatsapp' ? 'selected' : ''}>WhatsApp</option><option value="sms" ${st.default_channel === 'sms' ? 'selected' : ''}>SMS</option><option value="nessuno" ${st.default_channel === 'nessuno' ? 'selected' : ''}>Nessuno</option></select></label>
+        <label>WhatsApp Business del salone<input id="dWa" type="tel" inputmode="tel" value="${esc(st.salon_whatsapp || '')}" placeholder="+39 348 937 9342" ${admin ? '' : 'disabled'}></label>
+        <label>Testo del messaggio alla cliente<textarea id="dTpl" rows="4" ${admin ? '' : 'disabled'}>${esc(st.client_template || '')}</textarea></label>
+        ${admin ? '<p class="note" style="margin:-4px 0 0">Puoi usare <code>{nome}</code> <code>{quando}</code> <code>{data}</code> <code>{ora}</code> <code>{servizi}</code> <code>{whatsapp}</code></p>' : ''}
       </div>
-      <label>WhatsApp Business del salone<input id="dWa" type="tel" inputmode="tel" value="${esc(st.salon_whatsapp || '')}" placeholder="+39 348 937 9342"></label>
-      <label>Testo del messaggio alla cliente<textarea id="dTpl" rows="4">${esc(st.client_template || '')}</textarea></label>
-      <p class="note" style="margin:-4px 0 0">Puoi usare <code>{nome}</code> <code>{quando}</code> <code>{data}</code> <code>{ora}</code> <code>{servizi}</code> <code>{whatsapp}</code></p>
       <button class="btn gold block" id="saveDefaults">${admin ? 'Salva impostazioni' : 'Invia richiesta di modifica'}</button>
     </div>
 
@@ -2035,7 +2037,9 @@ async function renderSettings() {
       default_channel: $('#dCh').value, default_duration: +$('#dDur').value, client_template: $('#dTpl').value.trim(), salon_whatsapp: normalizePhone($('#dWa').value) || null,
     };
     const patch = {};
-    Object.entries(next).forEach(([k, v]) => { if (String(st[k] ?? '') !== String(v)) patch[k] = v; });
+    // i dipendenti non possono toccare la parte "messaggi alle clienti"
+    const LOCKED = ['client_r1', 'client_r2', 'default_channel', 'salon_whatsapp', 'client_template'];
+    Object.entries(next).forEach(([k, v]) => { if ((admin || !LOCKED.includes(k)) && String(st[k] ?? '') !== String(v)) patch[k] = v; });
     try { if (await submitChange({ settings: patch })) renderSettings(); } catch (e) { fail(e); }
   });
 
