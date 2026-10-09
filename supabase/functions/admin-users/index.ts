@@ -1,0 +1,94 @@
+// Diva's Agenda — gestione account dipendenti (solo amministratore)
+import { createClient } from "npm:@supabase/supabase-js@2.45.4";
+
+const cors = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+};
+const json = (body: unknown, status = 200) =>
+  new Response(JSON.stringify(body), { status, headers: { ...cors, "Content-Type": "application/json" } });
+
+const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!, {
+  auth: { persistSession: false, autoRefreshToken: false },
+});
+
+Deno.serve(async (req) => {
+  if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
+  try {
+    const jwt = (req.headers.get("Authorization") || "").replace("Bearer ", "");
+    const { data: who, error: whoErr } = await admin.auth.getUser(jwt);
+    if (whoErr || !who?.user) return json({ error: "Non autenticato" }, 401);
+    const { data: me } = await admin.from("profiles").select("*").eq("user_id", who.user.id).maybeSingle();
+    if (!me || me.role !== "admin" || !me.active) return json({ error: "Solo l'amministratore può gestire gli account" }, 403);
+
+    const body = await req.json().catch(() => ({}));
+    const { action } = body;
+
+    if (action === "list") {
+      const { data: profs } = await admin.from("profiles").select("*").order("role").order("created_at");
+      const out = [];
+      for (const p of profs || []) {
+        const { data } = await admin.auth.admin.getUserById(p.user_id);
+        out.push({ ...p, last_sign_in_at: data?.user?.last_sign_in_at || null });
+      }
+      return json({ users: out });
+    }
+
+    if (action === "create") {
+      const email = String(body.email || "").trim().toLowerCase();
+      const password = String(body.password || "");
+      const full_name = String(body.full_name || "").trim() || email.split("@")[0];
+      if (!email.includes("@")) return json({ error: "Email non valida" }, 400);
+      if (password.length < 8) return json({ error: "La password deve avere almeno 8 caratteri" }, 400);
+      const { data, error } = await admin.auth.admin.createUser({
+        email, password, email_confirm: true, user_metadata: { full_name },
+      });
+      if (error) {
+        const msg = /already|registered|exists/i.test(error.message) ? "Esiste già un account con questa email" : error.message;
+        return json({ error: msg }, 400);
+      }
+      const { error: pErr } = await admin.from("profiles").insert({ user_id: data.user.id, email, full_name, role: "staff" });
+      if (pErr) return json({ error: pErr.message }, 400);
+      return json({ ok: true, user_id: data.user.id });
+    }
+
+    const target = String(body.user_id || "");
+    if (!target) return json({ error: "Utente mancante" }, 400);
+    const { data: tp } = await admin.from("profiles").select("*").eq("user_id", target).maybeSingle();
+    if (!tp) return json({ error: "Utente non trovato" }, 404);
+
+    if (action === "reset_password") {
+      const password = String(body.password || "");
+      if (password.length < 8) return json({ error: "La password deve avere almeno 8 caratteri" }, 400);
+      const { error } = await admin.auth.admin.updateUserById(target, { password });
+      if (error) return json({ error: error.message }, 400);
+      return json({ ok: true });
+    }
+
+    if (tp.role === "admin") return json({ error: "L'account amministratore non può essere modificato o eliminato" }, 403);
+
+    if (action === "set_active") {
+      const active = !!body.active;
+      const { error } = await admin.auth.admin.updateUserById(target, { ban_duration: active ? "none" : "876000h" });
+      if (error) return json({ error: error.message }, 400);
+      await admin.from("profiles").update({ active }).eq("user_id", target);
+      return json({ ok: true });
+    }
+
+    if (action === "rename") {
+      await admin.from("profiles").update({ full_name: String(body.full_name || "").trim() }).eq("user_id", target);
+      return json({ ok: true });
+    }
+
+    if (action === "delete") {
+      const { error } = await admin.auth.admin.deleteUser(target);
+      if (error) return json({ error: error.message }, 400);
+      return json({ ok: true });
+    }
+
+    return json({ error: "Azione sconosciuta" }, 400);
+  } catch (e) {
+    return json({ error: String(e) }, 500);
+  }
+});
