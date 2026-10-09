@@ -17,6 +17,7 @@ const S = {
   tab: 'agenda',
   sel: startOfDay(new Date()),
   weekAppts: [],
+  agendaView: 'week',
   cassaPeriod: 'oggi',
   clientQuery: '',
 };
@@ -81,6 +82,7 @@ const ICON = {
   send: '<svg viewBox="0 0 24 24"><path d="M4 12L20 4l-6 16-3-7z"/></svg>',
   stop: '<svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>',
   plus: '<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>',
+  cal: '<svg viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="15" rx="2.5"/><path d="M3.5 9.5h17M8 3v4M16 3v4M7.5 13h2M11 13h2M14.5 13h2M7.5 16.5h2M11 16.5h2"/></svg>',
   image: '<svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><circle cx="9" cy="10" r="1.8"/><path d="M4 18l5-5 4 4 3-3 4 4"/></svg>',
 };
 
@@ -150,6 +152,31 @@ const ICON = {
   });
 })();
 
+
+/* ───────── Occhio mostra/nascondi password ───────── */
+const EYE_ON = '<svg viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/></svg>';
+const EYE_OFF = '<svg viewBox="0 0 24 24"><path d="M3 3l18 18M10.6 6a9.6 9.6 0 0 1 1.4-.1C18 5.9 21.5 12 21.5 12a17 17 0 0 1-3 3.7M6.6 6.9C4 8.6 2.5 12 2.5 12S6 18.5 12 18.5c1.6 0 3-.4 4.2-1M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg>';
+function addEyes(root = document) {
+  $$('input[type=password]:not([data-eye])', root).forEach((inp) => {
+    inp.dataset.eye = '1';
+    const wrap = document.createElement('span'); wrap.className = 'pwd-wrap';
+    inp.parentNode.insertBefore(wrap, inp); wrap.appendChild(inp);
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'eye'; b.setAttribute('aria-label', 'Mostra password'); b.setAttribute('aria-pressed', 'false');
+    b.innerHTML = EYE_ON;
+    b.addEventListener('click', () => {
+      const show = inp.type === 'password';
+      inp.type = show ? 'text' : 'password';
+      b.innerHTML = show ? EYE_OFF : EYE_ON;
+      b.setAttribute('aria-pressed', String(show));
+      b.setAttribute('aria-label', show ? 'Nascondi password' : 'Mostra password');
+      inp.focus({ preventScroll: true });
+    });
+    wrap.appendChild(b);
+  });
+}
+addEyes();
+
 /* ───────── Sheet ───────── */
 let sheetOpen = false;
 function openSheet(html, onMount) {
@@ -159,6 +186,7 @@ function openSheet(html, onMount) {
   document.body.style.overflow = 'hidden';
   if (!sheetOpen) { history.pushState({ sheet: 1 }, ''); sheetOpen = true; }
   $$('[data-close]', $('#sheet')).forEach((b) => b.addEventListener('click', closeSheet));
+  addEyes($('#sheet'));
   onMount && onMount($('#sheet'));
 }
 function closeSheetIfOpen() { if (sheetOpen) closeSheet(); }
@@ -232,6 +260,7 @@ async function boot() {
   setTab('agenda');
   handleDeepLink(location.hash);
   refreshPushSubscription();
+  refreshRequestBadge();
 }
 
 async function loadServices() {
@@ -397,7 +426,7 @@ function openMemberSheet(u) {
       <label>Nome<input id="mName" value="${esc(u.full_name || '')}"></label>
       <button class="btn" id="mRename">Salva nome</button>
       <div class="section-t">Password</div>
-      <label>Nuova password temporanea<input id="mPwd" type="text" minlength="8" placeholder="min 8 caratteri" autocomplete="off"></label>
+      <label>Nuova password temporanea<input id="mPwd" type="password" minlength="8" placeholder="min 8 caratteri" autocomplete="new-password"></label>
       <button class="btn" id="mReset">Imposta nuova password</button>
       <div class="section-t">Accesso</div>
       <button class="btn ${u.active ? '' : 'ok'}" id="mToggle">${u.active ? 'Disattiva account (non potrà più entrare)' : 'Riattiva account'}</button>
@@ -424,7 +453,7 @@ function openNewMemberSheet() {
     <form class="form" id="nmForm" autocomplete="off">
       <label>Nome e cognome<input id="nmName" required autocapitalize="words"></label>
       <label>Email<input id="nmEmail" type="email" required autocapitalize="off" inputmode="email"></label>
-      <label>Password iniziale<input id="nmPwd" type="text" required minlength="8" autocomplete="off" placeholder="min 8 caratteri"></label>
+      <label>Password iniziale<input id="nmPwd" type="password" required minlength="8" autocomplete="new-password" placeholder="min 8 caratteri"></label>
       <p class="note" style="margin:0">Comunica email e password al dipendente: potrà cambiarla da Impostazioni → Cambia password.</p>
       <p class="auth-msg" id="nmMsg" style="text-align:left"></p>
       <button class="btn gold block" id="nmSave">Crea account</button>
@@ -457,6 +486,12 @@ function setTab(t) {
 function setTop(eyebrow, title) { $('#topEyebrow').textContent = eyebrow; $('#topTitle').textContent = title; }
 
 function handleDeepLink(hash) {
+  if ((hash || '').startsWith('#/requests')) {
+    history.replaceState(null, '', location.pathname);
+    setTab('impostazioni');
+    setTimeout(() => $('#reqCard')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 600);
+    return;
+  }
   const m = (hash || '').match(/#\/(app|send)\/([0-9a-f-]{36})(?:\/(\d))?/);
   if (!m) return;
   history.replaceState(null, '', location.pathname);
@@ -469,40 +504,77 @@ if ('serviceWorker' in navigator) {
   });
 }
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden && S.user && S.unlocked && !sheetOpen) setTab(S.tab);
+  if (!document.hidden && S.user && S.unlocked && !sheetOpen) { setTab(S.tab); refreshRequestBadge(); }
 });
 
 /* ───────── Agenda ───────── */
 async function renderAgenda() {
-  const ws = startOfWeek(S.sel), we = addDays(ws, 7);
+  const month = S.agendaView === 'month';
+  let from, to;
+  if (month) {
+    const first = new Date(S.sel.getFullYear(), S.sel.getMonth(), 1);
+    from = startOfWeek(first); to = addDays(from, 42);
+  } else { from = startOfWeek(S.sel); to = addDays(from, 7); }
   setTop(S.sel.toLocaleDateString('it-IT', { month: 'long', year: 'numeric' }), sameDay(S.sel, new Date()) ? 'Oggi' : fmtLong(S.sel));
   const view = $('#view');
-  if (!view.querySelector('.week')) view.innerHTML = '<div class="list"><div class="empty muted">Caricamento…</div></div>';
+  if (!view.querySelector('.view-switch')) view.innerHTML = '<div class="list"><div class="empty muted">Caricamento…</div></div>';
   const { data, error } = await sb.from('appointments').select('*, attachments(id,kind)')
-    .gte('starts_at', ws.toISOString()).lt('starts_at', we.toISOString()).order('starts_at');
+    .gte('starts_at', from.toISOString()).lt('starts_at', to.toISOString()).order('starts_at');
   if (error) return fail(error);
   if (S.tab !== 'agenda') return;
   S.weekAppts = data || [];
 
   const today = new Date();
-  const days = Array.from({ length: 7 }, (_, i) => addDays(ws, i));
+  const countOn = (d) => S.weekAppts.filter((a) => a.status !== 'cancelled' && sameDay(new Date(a.starts_at), d)).length;
   const dayAppts = S.weekAppts.filter((a) => sameDay(new Date(a.starts_at), S.sel));
   const active = dayAppts.filter((a) => a.status !== 'cancelled');
   const tot = active.reduce((s, a) => s + Number(a.price || 0), 0);
 
-  view.innerHTML = `
+  let cal;
+  if (month) {
+    const m = S.sel.getMonth();
+    const cells = Array.from({ length: 42 }, (_, i) => addDays(from, i));
+    const rows = cells[35].getMonth() === m ? 42 : 35;
+    const monthTot = S.weekAppts.filter((a) => a.status !== 'cancelled' && new Date(a.starts_at).getMonth() === m).length;
+    cal = `
+    <div class="month glass">
+      <div class="month-head">
+        <button class="week-nav" data-m="-1" aria-label="Mese precedente">${ICON.left}</button>
+        <div><strong>${esc(S.sel.toLocaleDateString('it-IT', { month: 'long', year: 'numeric' }))}</strong><small>${monthTot} ${monthTot === 1 ? 'appuntamento' : 'appuntamenti'}</small></div>
+        <button class="week-nav" data-m="1" aria-label="Mese successivo">${ICON.right}</button>
+      </div>
+      <div class="mgrid">
+        ${['lun', 'mar', 'mer', 'gio', 'ven', 'sab', 'dom'].map((w) => `<span class="mwd">${w}</span>`).join('')}
+        ${cells.slice(0, rows).map((d) => {
+          const n = countOn(d);
+          return `<button class="mday ${d.getMonth() !== m ? 'out' : ''} ${sameDay(d, S.sel) ? 'sel' : ''} ${sameDay(d, today) ? 'today' : ''} ${n ? 'has' : ''}" data-d="${ymd(d)}">
+            <b>${d.getDate()}</b>${n ? `<i>${n}</i>` : '<i></i>'}</button>`;
+        }).join('')}
+      </div>
+    </div>`;
+  } else {
+    const days = Array.from({ length: 7 }, (_, i) => addDays(from, i));
+    cal = `
     <div class="week">
       <button class="week-nav" data-w="-7" aria-label="Settimana precedente">${ICON.left}</button>
       <div class="days">
         ${days.map((d) => {
-          const n = S.weekAppts.filter((a) => a.status !== 'cancelled' && sameDay(new Date(a.starts_at), d)).length;
+          const n = countOn(d);
           return `<button class="day ${sameDay(d, S.sel) ? 'sel' : ''} ${sameDay(d, today) ? 'today' : ''}" data-d="${ymd(d)}">
             <small>${d.toLocaleDateString('it-IT', { weekday: 'short' }).slice(0, 3)}</small><b>${d.getDate()}</b>
             <span class="dots">${'<i></i>'.repeat(Math.min(n, 4))}</span></button>`;
         }).join('')}
       </div>
       <button class="week-nav" data-w="7" aria-label="Settimana successiva">${ICON.right}</button>
+    </div>`;
+  }
+
+  view.innerHTML = `
+    <div class="seg view-switch" role="tablist" aria-label="Vista calendario">
+      <button data-v="week" class="${month ? '' : 'on'}">Settimana</button>
+      <button data-v="month" class="${month ? 'on' : ''}">${ICON.cal} Mese intero</button>
     </div>
+    ${cal}
     <div class="day-summary">
       <h2>${esc(fmtLong(S.sel))}</h2>
       <span>${active.length} ${active.length === 1 ? 'appuntamento' : 'appuntamenti'}${tot ? ' · ' + eur(tot) : ''}</span>
@@ -513,8 +585,14 @@ async function renderAgenda() {
         <div class="muted">Tocca + per aggiungere un appuntamento</div></div>`}
     </div>`;
 
-  $$('.day', view).forEach((b) => b.addEventListener('click', () => { const [y, m, d] = b.dataset.d.split('-').map(Number); S.sel = new Date(y, m - 1, d); renderAgenda(); }));
-  $$('.week-nav', view).forEach((b) => b.addEventListener('click', () => { S.sel = addDays(S.sel, Number(b.dataset.w)); renderAgenda(); }));
+  $$('.view-switch button', view).forEach((b) => b.addEventListener('click', () => { S.agendaView = b.dataset.v; renderAgenda(); }));
+  $$('.day, .mday', view).forEach((b) => b.addEventListener('click', () => {
+    const [y, m, d] = b.dataset.d.split('-').map(Number); S.sel = new Date(y, m - 1, d); renderAgenda();
+  }));
+  $$('[data-w]', view).forEach((b) => b.addEventListener('click', () => { S.sel = addDays(S.sel, Number(b.dataset.w)); renderAgenda(); }));
+  $$('[data-m]', view).forEach((b) => b.addEventListener('click', () => {
+    S.sel = new Date(S.sel.getFullYear(), S.sel.getMonth() + Number(b.dataset.m), 1); renderAgenda();
+  }));
   $$('.appt', view).forEach((c) => c.addEventListener('click', () => openDetail(c.dataset.id)));
 }
 
@@ -622,11 +700,11 @@ async function openForm(appt, opts = {}) {
       const extra = [...selSvcs].filter((n) => !S.services.some((s) => s.name === n));
       grid.innerHTML = [...S.services.map((s) => s.name), ...extra].map((n) =>
         `<button type="button" class="svc ${selSvcs.has(n) ? 'on' : ''}" data-n="${esc(n)}"><span class="sw" style="background:${svcColor(n)}"></span>${esc(n)}</button>`).join('')
-        + `<button type="button" class="svc add" id="addSvc">${ICON.plus.replace('<svg', '<svg style="width:15px;height:15px"')} Aggiungi</button>`;
+        + (!isAdmin() ? '' : `<button type="button" class="svc add" id="addSvc">${ICON.plus.replace('<svg', '<svg style="width:15px;height:15px"')} Aggiungi</button>`);
       $$('.svc[data-n]', grid).forEach((b) => b.addEventListener('click', () => {
         const n = b.dataset.n; selSvcs.has(n) ? selSvcs.delete(n) : selSvcs.add(n); renderSvcs(); autoPrice();
       }));
-      $('#addSvc', grid).addEventListener('click', async () => {
+      $('#addSvc', grid)?.addEventListener('click', async () => {
         const n = (prompt('Nome del nuovo servizio (es. Trattamento, Meches, Barba):') || '').trim();
         if (!n) return;
         const p = prompt(`Prezzo standard per "${n}" in € (lascia vuoto se variabile):`);
@@ -732,7 +810,7 @@ async function upsertClient(name, phone) {
   if (p) {
     const { data: ex } = await sb.from('clients').select('id,name').eq('phone', p).limit(1);
     if (ex?.length) {
-      if (ex[0].name !== name) await sb.from('clients').update({ name }).eq('id', ex[0].id);
+      if (ex[0].name !== name && isAdmin()) await sb.from('clients').update({ name }).eq('id', ex[0].id);
       return ex[0].id;
     }
     const { data, error } = await sb.from('clients').insert({ name, phone: p }).select().single();
@@ -998,7 +1076,11 @@ async function openSendPrompt(id, slot, appt) {
 async function renderClients() {
   setTop('Rubrica', 'Clienti');
   const view = $('#view');
-  view.innerHTML = `<input class="search" type="search" id="cq" placeholder="Cerca per nome o numero…" value="${esc(S.clientQuery)}"><div class="list" id="clist"><div class="muted">Caricamento…</div></div>`;
+  view.innerHTML = `<div style="display:flex;gap:8px;align-items:center" class="search">
+      <input type="search" id="cq" placeholder="Cerca per nome o numero…" value="${esc(S.clientQuery)}">
+      ${isAdmin() ? `<button class="btn gold" id="newClient" style="flex:none;padding:10px 14px">${ICON.plus} Nuova</button>` : ''}
+    </div><div class="list" id="clist"><div class="muted">Caricamento…</div></div>`;
+  $('#newClient')?.addEventListener('click', () => openClientForm());
   const [{ data: clients, error }, { data: appts }] = await Promise.all([
     sb.from('clients').select('*').order('name'),
     sb.from('appointments').select('client_id, starts_at, price, paid, paid_amount, status'),
@@ -1043,30 +1125,53 @@ async function openClient(c, s = {}) {
       <div class="stat glass"><small>Ultima</small><b style="font-size:18px">${s?.last ? fmtShort(s.last) : '—'}</b></div>
     </div>
     <div class="form">
-      <label>Nome<input id="cName" value="${esc(c.name)}"></label>
-      <label>Cellulare<input id="cPhone" type="tel" value="${esc(c.phone || '')}"></label>
-      <label>Note cliente<textarea id="cNotes" placeholder="Formula colore abituale, preferenze…">${esc(c.notes || '')}</textarea></label>
+      ${isAdmin() ? '' : '<p class="note" style="margin:0">Solo l\'amministratrice può modificare o eliminare le schede clienti.</p>'}
+      <label>Nome<input id="cName" value="${esc(c.name)}" ${isAdmin() ? '' : 'disabled'}></label>
+      <label>Cellulare<input id="cPhone" type="tel" value="${esc(c.phone || '')}" ${isAdmin() ? '' : 'disabled'}></label>
+      <label>Note cliente<textarea id="cNotes" placeholder="Formula colore abituale, preferenze…" ${isAdmin() ? '' : 'disabled'}>${esc(c.notes || '')}</textarea></label>
       <div class="actions">
-        <button class="btn gold" id="cSave">Salva</button>
-        <button class="btn" id="cNew">${ICON.plus} Appuntamento</button>
+        ${isAdmin() ? '<button class="btn gold" id="cSave">Salva</button>' : ''}
+        <button class="btn ${isAdmin() ? '' : 'full'}" id="cNew">${ICON.plus} Appuntamento</button>
       </div>
     </div>
     <div class="section-t" style="margin:20px 0 10px">Storico</div>
     <div class="list">${(hist || []).length ? hist.map(apptCard).join('') : '<div class="muted">Nessun appuntamento</div>'}</div>
-    <button class="btn danger block" id="cDel" style="margin-top:16px">${ICON.trash} Elimina cliente</button>
+    ${isAdmin() ? `<button class="btn danger block" id="cDel" style="margin-top:16px">${ICON.trash} Elimina cliente</button>` : ''}
   `, (root) => {
     $$('.appt', root).forEach((el) => el.addEventListener('click', () => openDetail(el.dataset.id)));
     $('#cNew', root).addEventListener('click', () => openForm(null, { name: c.name, phone: c.phone, date: S.sel }));
-    $('#cSave', root).addEventListener('click', async () => {
+    $('#cSave', root)?.addEventListener('click', async () => {
+      if (!confirm('Confermi le modifiche alla scheda cliente?')) return;
       const { error } = await sb.from('clients').update({ name: $('#cName', root).value.trim(), phone: normalizePhone($('#cPhone', root).value) || null, notes: $('#cNotes', root).value.trim() || null }).eq('id', c.id);
       if (error) return fail(error.code === '23505' ? { message: 'Esiste già una cliente con questo numero' } : error);
       toast('Cliente aggiornata ✨'); closeSheet(); renderClients();
     });
-    $('#cDel', root).addEventListener('click', async () => {
+    $('#cDel', root)?.addEventListener('click', async () => {
       if (!confirm(`Eliminare ${c.name} dalla rubrica? Gli appuntamenti restano in agenda.`)) return;
       const { error } = await sb.from('clients').delete().eq('id', c.id);
       if (error) return fail(error);
       closeSheet(); renderClients();
+    });
+  });
+}
+
+function openClientForm() {
+  openSheet(`
+    ${sheetHead('Nuova cliente')}
+    <form class="form" id="ncForm" autocomplete="off">
+      <label>Nome e cognome<input id="ncName" required autocapitalize="words"></label>
+      <label>Cellulare<input id="ncPhone" type="tel" inputmode="tel" placeholder="+39 333 1234567"></label>
+      <label>Note<textarea id="ncNotes" placeholder="Formula colore abituale, preferenze, allergie…"></textarea></label>
+      <button class="btn gold block" id="ncSave">Salva cliente</button>
+    </form>`, (root) => {
+    $('#ncForm', root).addEventListener('submit', async (e) => {
+      e.preventDefault();
+      if (!confirm('Confermi la creazione della nuova cliente?')) return;
+      const { error } = await sb.from('clients').insert({
+        name: $('#ncName', root).value.trim(), phone: normalizePhone($('#ncPhone', root).value) || null, notes: $('#ncNotes', root).value.trim() || null,
+      });
+      if (error) return fail(error.code === '23505' ? { message: 'Esiste già una cliente con questo numero' } : error);
+      closeSheet(); toast('Cliente salvata ✨'); renderClients();
     });
   });
 }
@@ -1118,6 +1223,114 @@ async function renderCassa() {
 }
 
 /* ───────── Impostazioni ───────── */
+const SETTING_LABELS = {
+  staff_r1: 'Promemoria operatrice 1', staff_r2: 'Promemoria operatrice 2', client_r1: 'Promemoria cliente 1', client_r2: 'Promemoria cliente 2',
+  default_channel: 'Canale predefinito', default_duration: 'Durata predefinita', client_template: 'Testo messaggio cliente',
+};
+function settingValueLabel(k, v) {
+  if (k.startsWith('staff_r')) return optLabel(STAFF_OPTS, v);
+  if (k.startsWith('client_r')) return optLabel(CLIENT_OPTS, v);
+  if (k === 'default_duration') return durLabel(Number(v));
+  if (k === 'default_channel') return ({ whatsapp: 'WhatsApp', sms: 'SMS', nessuno: 'Nessuno' })[v] || v;
+  return `"${String(v).slice(0, 60)}${String(v).length > 60 ? '…' : ''}"`;
+}
+// righe leggibili che descrivono una richiesta/modifica
+function describeChange(payload) {
+  const out = [];
+  Object.entries(payload.settings || {}).forEach(([k, v]) => out.push(`${SETTING_LABELS[k] || k}: ${settingValueLabel(k, v)}`));
+  const sv = payload.services || {};
+  (sv.update || []).forEach((u) => {
+    const bits = [];
+    if (u.before?.name !== u.name) bits.push(`nome "${u.before?.name}" → "${u.name}"`);
+    if (Number(u.before?.default_price ?? -1) !== Number(u.default_price ?? -1)) bits.push(`prezzo ${eur(u.before?.default_price)} → ${eur(u.default_price)}`);
+    if (u.before?.color !== u.color) bits.push('colore');
+    if (bits.length) out.push(`${u.before?.name || u.name}: ${bits.join(', ')}`);
+  });
+  (sv.add || []).forEach((x) => out.push(`Nuovo servizio "${x.name}"${x.default_price != null ? ' a ' + eur(x.default_price) : ''}`));
+  (sv.delete || []).forEach((x) => out.push(`Rimuovi servizio "${x.name}"`));
+  return out;
+}
+async function applyChange(payload) {
+  if (payload.settings && Object.keys(payload.settings).length) {
+    const { error } = await sb.from('settings').update({ ...payload.settings, updated_at: new Date().toISOString() }).eq('user_id', S.settings.user_id);
+    if (error) throw error;
+  }
+  const sv = payload.services || {};
+  for (const u of sv.update || []) {
+    const { error } = await sb.from('services').update({ name: u.name, default_price: u.default_price, color: u.color }).eq('id', u.id);
+    if (error) throw error;
+  }
+  for (const x of sv.add || []) {
+    const { error } = await sb.from('services').insert({ name: x.name, default_price: x.default_price, color: x.color, sort: x.sort || 99 });
+    if (error) throw error;
+  }
+  for (const x of sv.delete || []) {
+    const { error } = await sb.from('services').delete().eq('id', x.id);
+    if (error) throw error;
+  }
+  await Promise.all([loadServices(), loadSettings()]);
+}
+async function submitChange(payload) {
+  const lines = describeChange(payload);
+  if (!lines.length) { toast('Nessuna modifica da salvare'); return false; }
+  const list = lines.map((l) => '• ' + l).join('\n');
+  if (isAdmin()) {
+    if (!confirm(`Confermi queste modifiche?\n\n${list}`)) return false;
+    await applyChange(payload);
+    toast('Modifiche salvate ✨');
+  } else {
+    if (!confirm(`Le modifiche verranno inviate all'amministratrice per l'approvazione:\n\n${list}\n\nInviare la richiesta?`)) return false;
+    const { error } = await sb.from('change_requests').insert({ payload, summary: lines.slice(0, 3).join('; ') + (lines.length > 3 ? ` (+${lines.length - 3})` : '') });
+    if (error) throw error;
+    toast('Richiesta inviata all\'amministratrice 🛎️');
+  }
+  return true;
+}
+async function refreshRequestBadge() {
+  if (!isAdmin()) return;
+  const { count } = await sb.from('change_requests').select('id', { count: 'exact', head: true }).eq('status', 'pending');
+  S.pendingCount = count || 0;
+  const tab = $('.tabbar [data-tab="impostazioni"]');
+  $('.tab-dot', tab)?.remove();
+  if (S.pendingCount) tab.insertAdjacentHTML('beforeend', `<span class="tab-dot">${S.pendingCount}</span>`);
+}
+async function renderRequests(box) {
+  const q = sb.from('change_requests').select('*').order('created_at', { ascending: false }).limit(isAdmin() ? 30 : 10);
+  const { data } = isAdmin() ? await q.eq('status', 'pending') : await q.eq('requested_by', S.user.id);
+  if (!data?.length) {
+    box.closest('.card')?.classList.toggle('hidden', !isAdmin() ? true : false);
+    box.innerHTML = '<div class="muted" style="font-size:14px">Nessuna richiesta in attesa ✨</div>';
+    return;
+  }
+  box.closest('.card')?.classList.remove('hidden');
+  const when = (d) => new Date(d).toLocaleString('it-IT', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+  box.innerHTML = data.map((r) => `
+    <div class="req" data-id="${r.id}">
+      <div class="who-line"><strong>${esc(isAdmin() ? memberName(r.requested_by) || 'Dipendente' : 'La tua richiesta')}</strong>
+        <span class="muted">${when(r.created_at)}</span></div>
+      <ul>${describeChange(r.payload).map((l) => `<li>${esc(l)}</li>`).join('')}</ul>
+      ${isAdmin() ? `<div class="actions"><button class="btn ok" data-ok>${ICON.check} Approva</button><button class="btn danger" data-no>Rifiuta</button></div>`
+        : `<span class="badge ${r.status === 'approved' ? 'ok' : r.status === 'rejected' ? 'danger' : 'warn'}">${r.status === 'approved' ? 'Approvata' : r.status === 'rejected' ? 'Non approvata' : 'In attesa'}</span>`}
+    </div>`).join('');
+  if (!isAdmin()) return;
+  $$('.req', box).forEach((el) => {
+    const r = data.find((x) => x.id === el.dataset.id);
+    const decide = async (approve) => {
+      const lines = describeChange(r.payload).map((l) => '• ' + l).join('\n');
+      if (!confirm(`${approve ? 'Approvare' : 'Rifiutare'} la richiesta di ${memberName(r.requested_by) || 'un dipendente'}?\n\n${lines}`)) return;
+      try {
+        if (approve) await applyChange(r.payload);
+        const { error } = await sb.from('change_requests').update({ status: approve ? 'approved' : 'rejected', decided_by: S.user.id, decided_at: new Date().toISOString() }).eq('id', r.id);
+        if (error) throw error;
+        toast(approve ? 'Richiesta approvata e applicata ✓' : 'Richiesta rifiutata');
+        renderSettings();
+      } catch (e) { fail(e); }
+    };
+    $('[data-ok]', el).addEventListener('click', () => decide(true));
+    $('[data-no]', el).addEventListener('click', () => decide(false));
+  });
+}
+
 async function renderSettings() {
   setTop(isAdmin() ? 'Amministratrice' : 'Il tuo profilo', 'Impostazioni');
   const st = S.settings;
@@ -1127,12 +1340,16 @@ async function renderSettings() {
   const bioOn = bio.enabledFor(S.user.id);
   const standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone;
   const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent);
-  const dis = admin ? '' : 'disabled';
   const opt = (opts, v) => opts.map(([val, l]) => `<option value="${val}" ${Number(v) === val ? 'selected' : ''}>${l}</option>`).join('');
   $('#view').innerHTML = `
     ${!standalone ? `<div class="install-tip glass"><div style="font-size:24px">📲</div><div><b>Installa l'app sul telefono</b><br>
       ${isIOS ? 'In Safari tocca <b>Condividi</b> ⬆️ e poi <b>"Aggiungi alla schermata Home"</b>. Necessario su iPhone per ricevere le notifiche.' : 'Apri il menu ⋮ del browser e scegli <b>"Installa app"</b> o <b>"Aggiungi a schermata Home"</b>.'}
       ${deferredInstall ? '<br><button class="btn gold" id="installBtn" style="margin-top:10px">Installa ora</button>' : ''}</div></div>` : ''}
+
+    <div class="card glass ${admin ? '' : 'hidden'}" id="reqCard">
+      <h3>${admin ? 'Richieste da approvare' : 'Le tue richieste'}</h3>
+      <div id="reqBox"><div class="muted">Caricamento…</div></div>
+    </div>
 
     <div class="card glass">
       <h3>Il mio account</h3>
@@ -1166,24 +1383,25 @@ async function renderSettings() {
     </div>` : ''}
 
     <div class="card glass form">
-      <h3>Promemoria predefiniti</h3>
-      ${admin ? '' : '<p class="note" style="margin:-6px 0 0">Solo l\'amministratrice può modificare queste impostazioni.</p>'}
-      <label>🔔 Per l'operatrice<div class="row"><select id="dS1" ${dis}>${opt(STAFF_OPTS, st.staff_r1)}</select><select id="dS2" ${dis}>${opt(STAFF_OPTS, st.staff_r2)}</select></div></label>
-      <label>💬 Per la cliente<div class="row"><select id="dC1" ${dis}>${opt(CLIENT_OPTS, st.client_r1)}</select><select id="dC2" ${dis}>${opt(CLIENT_OPTS, st.client_r2)}</select></div></label>
+      <h3>Promemoria e messaggi</h3>
+      ${admin ? '' : '<p class="pending-note">Puoi proporre modifiche: verranno inviate all\'amministratrice, che riceve una notifica e decide se approvarle.</p>'}
+      <label>🔔 Per l'operatrice<div class="row"><select id="dS1">${opt(STAFF_OPTS, st.staff_r1)}</select><select id="dS2">${opt(STAFF_OPTS, st.staff_r2)}</select></div></label>
+      <label>💬 Per la cliente<div class="row"><select id="dC1">${opt(CLIENT_OPTS, st.client_r1)}</select><select id="dC2">${opt(CLIENT_OPTS, st.client_r2)}</select></div></label>
       <div class="row">
-        <label>Canale predefinito<select id="dCh" ${dis}><option value="whatsapp" ${st.default_channel === 'whatsapp' ? 'selected' : ''}>WhatsApp</option><option value="sms" ${st.default_channel === 'sms' ? 'selected' : ''}>SMS</option><option value="nessuno" ${st.default_channel === 'nessuno' ? 'selected' : ''}>Nessuno</option></select></label>
-        <label>Durata predefinita<select id="dDur" ${dis}>${DURATIONS.map((m) => `<option value="${m}" ${m === st.default_duration ? 'selected' : ''}>${durLabel(m)}</option>`).join('')}</select></label>
+        <label>Canale predefinito<select id="dCh"><option value="whatsapp" ${st.default_channel === 'whatsapp' ? 'selected' : ''}>WhatsApp</option><option value="sms" ${st.default_channel === 'sms' ? 'selected' : ''}>SMS</option><option value="nessuno" ${st.default_channel === 'nessuno' ? 'selected' : ''}>Nessuno</option></select></label>
+        <label>Durata predefinita<select id="dDur">${DURATIONS.map((m) => `<option value="${m}" ${m === st.default_duration ? 'selected' : ''}>${durLabel(m)}</option>`).join('')}</select></label>
       </div>
-      <label>Testo del messaggio alla cliente<textarea id="dTpl" rows="4" ${dis}>${esc(st.client_template || '')}</textarea></label>
+      <label>Testo del messaggio alla cliente<textarea id="dTpl" rows="4">${esc(st.client_template || '')}</textarea></label>
       <p class="note" style="margin:-4px 0 0">Puoi usare <code>{nome}</code> <code>{quando}</code> <code>{data}</code> <code>{ora}</code> <code>{servizi}</code></p>
-      ${admin ? '<button class="btn gold block" id="saveDefaults">Salva impostazioni</button>' : ''}
+      <button class="btn gold block" id="saveDefaults">${admin ? 'Salva impostazioni' : 'Invia richiesta di modifica'}</button>
     </div>
 
-    ${admin ? `<div class="card glass">
+    <div class="card glass">
       <h3>Servizi e listino</h3>
       <div id="svcList"></div>
       <button class="btn block" id="addSvc2" style="margin-top:10px">${ICON.plus} Aggiungi servizio</button>
-    </div>` : ''}
+      <button class="btn gold block" id="saveSvcs" style="margin-top:8px">${admin ? 'Salva listino' : 'Invia richiesta di modifica'}</button>
+    </div>
     <p class="note" style="text-align:center">Diva's Hairboutique · Agenda ✦</p>`;
 
   $('#installBtn')?.addEventListener('click', async () => { deferredInstall.prompt(); deferredInstall = null; });
@@ -1204,49 +1422,60 @@ async function renderSettings() {
     if (!confirm('Uscire dall\'account su questo telefono?')) return;
     bio.write(null); await sb.auth.signOut(); location.reload();
   });
-  if (!admin) return;
+  renderRequests($('#reqBox'));
+  refreshRequestBadge();
+  if (admin) { renderTeam($('#teamBox')); $('#addMember').addEventListener('click', openNewMemberSheet); }
 
-  renderTeam($('#teamBox'));
-  $('#addMember').addEventListener('click', openNewMemberSheet);
   $('#saveDefaults').addEventListener('click', async () => {
-    const patch = {
+    const next = {
       staff_r1: +$('#dS1').value, staff_r2: +$('#dS2').value, client_r1: +$('#dC1').value, client_r2: +$('#dC2').value,
-      default_channel: $('#dCh').value, default_duration: +$('#dDur').value, client_template: $('#dTpl').value.trim(), updated_at: new Date().toISOString(),
+      default_channel: $('#dCh').value, default_duration: +$('#dDur').value, client_template: $('#dTpl').value.trim(),
     };
-    const { error } = await sb.from('settings').update(patch).eq('user_id', S.settings.user_id);
-    if (error) return fail(error);
-    Object.assign(S.settings, patch); toast('Impostazioni salvate ✨');
+    const patch = {};
+    Object.entries(next).forEach(([k, v]) => { if (String(st[k] ?? '') !== String(v)) patch[k] = v; });
+    try { if (await submitChange({ settings: patch })) renderSettings(); } catch (e) { fail(e); }
   });
 
+  // listino: bozza locale, salvata/inviata con un pulsante
+  const draft = S.services.map((x) => ({ ...x }));
+  const removed = [];
+  let tmp = 0;
   const drawSvcs = () => {
-    $('#svcList').innerHTML = S.services.map((s) => `<div class="set-row" data-id="${s.id}">
-      <input type="color" value="${s.color || '#c6a84b'}" aria-label="Colore">
-      <input type="text" value="${esc(s.name)}" aria-label="Nome servizio">
-      <input type="number" class="price" inputmode="decimal" step="0.5" value="${s.default_price ?? ''}" placeholder="€" aria-label="Prezzo">
-      <button class="mini-btn" data-del aria-label="Elimina">${ICON.trash}</button></div>`).join('');
+    $('#svcList').innerHTML = draft.map((x) => `<div class="set-row" data-id="${x.id}">
+      <input type="color" value="${x.color || '#c6a84b'}" aria-label="Colore">
+      <input type="text" value="${esc(x.name)}" aria-label="Nome servizio">
+      <input type="number" class="price" inputmode="decimal" step="0.5" value="${x.default_price ?? ''}" placeholder="€" aria-label="Prezzo">
+      <button class="mini-btn" data-del aria-label="Elimina">${ICON.trash}</button></div>`).join('') || '<div class="muted">Nessun servizio</div>';
     $$('.set-row', $('#svcList')).forEach((row) => {
-      const id = row.dataset.id;
+      const it = draft.find((x) => String(x.id) === row.dataset.id);
       const [col, name, price] = $$('input', row);
-      const save = async () => {
-        const patch = { color: col.value, name: name.value.trim() || 'Servizio', default_price: price.value === '' ? null : Number(price.value) };
-        const { error } = await sb.from('services').update(patch).eq('id', id);
-        if (error) return fail(error);
-        Object.assign(S.services.find((x) => x.id === id), patch); toast('Listino aggiornato');
-      };
-      [col, name, price].forEach((i) => i.addEventListener('change', save));
-      $('[data-del]', row).addEventListener('click', async () => {
-        if (!confirm(`Rimuovere "${name.value}" dal listino?`)) return;
-        await sb.from('services').delete().eq('id', id);
-        S.services = S.services.filter((x) => x.id !== id); drawSvcs();
+      col.addEventListener('input', () => { it.color = col.value; });
+      name.addEventListener('input', () => { it.name = name.value.trim(); });
+      price.addEventListener('input', () => { it.default_price = price.value === '' ? null : Number(price.value); });
+      $('[data-del]', row).addEventListener('click', () => {
+        draft.splice(draft.indexOf(it), 1);
+        if (!String(it.id).startsWith('new-')) removed.push({ id: it.id, name: S.services.find((x) => x.id === it.id)?.name || it.name });
+        drawSvcs();
       });
     });
   };
   drawSvcs();
-  $('#addSvc2').addEventListener('click', async () => {
-    const { data, error } = await sb.from('services').insert({ name: 'Nuovo servizio', color: '#a7e3c9', sort: S.services.length + 1 }).select().single();
-    if (error) return fail(error);
-    S.services.push(data); drawSvcs();
-    const inputs = $$('.set-row input[type=text]'); inputs[inputs.length - 1].select();
+  $('#addSvc2').addEventListener('click', () => {
+    const palette = ['#a7e3c9', '#f5c58a', '#b5b0ff', '#c6a84b', '#d9b7e8', '#9ec5ff', '#f2a7b5'];
+    draft.push({ id: 'new-' + (++tmp), name: 'Nuovo servizio', default_price: null, color: palette[tmp % palette.length], sort: draft.length + 1 });
+    drawSvcs();
+    const inputs = $$('#svcList input[type=text]'); inputs[inputs.length - 1].select();
+  });
+  $('#saveSvcs').addEventListener('click', async () => {
+    const update = [], add = [];
+    draft.forEach((x) => {
+      if (String(x.id).startsWith('new-')) { if (x.name) add.push({ name: x.name, default_price: x.default_price, color: x.color, sort: x.sort }); return; }
+      const o = S.services.find((y) => y.id === x.id);
+      if (o && (o.name !== x.name || Number(o.default_price ?? -1) !== Number(x.default_price ?? -1) || o.color !== x.color)) {
+        update.push({ id: x.id, name: x.name || o.name, default_price: x.default_price, color: x.color, before: { name: o.name, default_price: o.default_price, color: o.color } });
+      }
+    });
+    try { if (await submitChange({ services: { update, add, delete: removed } })) renderSettings(); } catch (e) { fail(e); }
   });
 }
 

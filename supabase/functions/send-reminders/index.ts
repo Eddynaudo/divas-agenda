@@ -175,5 +175,34 @@ Deno.serve(async (req) => {
       results.push({ id: r.id, ok: false });
     }
   }
-  return Response.json({ processed: results.length });
+  // ── Richieste di modifica: avvisa l'admin delle nuove, e il dipendente dell'esito ──
+  const { data: newReqs } = await sb.from("change_requests").select("*").eq("status", "pending").is("admin_notified_at", null).limit(50);
+  if (newReqs?.length) {
+    const { data: admins } = await sb.from("profiles").select("user_id").eq("role", "admin").eq("active", true);
+    const { data: people } = await sb.from("profiles").select("user_id, full_name, email");
+    const nameOf = (id: string) => { const p = (people || []).find((x) => x.user_id === id); return p?.full_name || p?.email || "Un dipendente"; };
+    for (const cr of newReqs) {
+      for (const ad of admins || []) {
+        await pushTo(ad.user_id, {
+          title: "🛎️ Richiesta di modifica",
+          body: `${nameOf(cr.requested_by)}: ${cr.summary || "modifica alle impostazioni"}. Tocca per approvare o rifiutare.`,
+          tag: `cr-${cr.id}`,
+          url: "./#/requests",
+        });
+      }
+      await sb.from("change_requests").update({ admin_notified_at: new Date().toISOString() }).eq("id", cr.id);
+    }
+  }
+  const { data: decided } = await sb.from("change_requests").select("*").neq("status", "pending").is("requester_notified_at", null).limit(50);
+  for (const cr of decided || []) {
+    await pushTo(cr.requested_by, {
+      title: cr.status === "approved" ? "✅ Modifica approvata" : "❌ Modifica non approvata",
+      body: cr.summary || "La tua richiesta di modifica è stata valutata dall'amministratrice.",
+      tag: `cr-${cr.id}-esito`,
+      url: "./",
+    });
+    await sb.from("change_requests").update({ requester_notified_at: new Date().toISOString() }).eq("id", cr.id);
+  }
+
+  return Response.json({ processed: results.length, requests: (newReqs || []).length + (decided || []).length });
 });
