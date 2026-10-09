@@ -65,6 +65,7 @@ Deno.serve(async (req) => {
   if (error) return new Response(error.message, { status: 500 });
 
   const subsCache: Record<string, any[]> = {};
+  let adminIds: string[] | null = null;
   const results: any[] = [];
 
   // impostazioni del salone (unica riga)
@@ -127,6 +128,7 @@ Deno.serve(async (req) => {
           a,
         );
         let sentAuto = false;
+        let delivered = 0;
         let lastErr: string | null = null;
         // Invio automatico via WhatsApp Business Cloud API (Meta) se configurato
         if (a.client_channel === "whatsapp" && sec.wa_token && sec.wa_phone_id && a.phone) {
@@ -155,8 +157,13 @@ Deno.serve(async (req) => {
           else lastErr = (await res.text()).slice(0, 300);
         }
         if (!sentAuto && a.phone && a.client_channel !== "nessuno") {
-          // Invio con un tocco: notifica alla parrucchiera che apre WhatsApp/SMS col testo già pronto
-          await pushTo(to, {
+          // Invio con un tocco: la notifica arriva SEMPRE all'amministratrice (WhatsApp Business del salone),
+          // anche se l'appuntamento è stato creato da un dipendente
+          if (!adminIds) {
+            const { data: ads } = await sb.from("profiles").select("user_id").eq("role", "admin").eq("active", true);
+            adminIds = (ads || []).map((x) => x.user_id);
+          }
+          for (const adminId of (adminIds.length ? adminIds : [to])) delivered += await pushTo(adminId, {
             title: `💬 Promemoria per ${a.client_name}`,
             body: `Tocca per inviare il messaggio (${a.client_channel === "sms" ? "SMS" : "WhatsApp"})`,
             tag: `appt-${a.id}-client-${r.slot}`,
@@ -164,9 +171,10 @@ Deno.serve(async (req) => {
           });
         }
         await sb.from("reminders").update({
-          status: sentAuto ? "sent" : (a.phone ? "sent" : "failed"),
+          status: sentAuto || delivered > 0 ? "sent" : "failed",
           sent_at: new Date().toISOString(),
-          last_error: sentAuto ? null : (lastErr ? `WhatsApp API: ${lastErr}` : "manuale (notifica alla parrucchiera)"),
+          last_error: sentAuto ? null : delivered > 0 ? "inviata notifica all'amministratrice"
+            : (lastErr ? `WhatsApp API: ${lastErr}` : "l'amministratrice non ha attivato le notifiche"),
         }).eq("id", r.id);
       }
       results.push({ id: r.id, ok: true });

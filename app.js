@@ -22,8 +22,8 @@ const S = {
   clientQuery: '',
 };
 
-const STAFF_OPTS = [[0, 'Nessuno'], [10, '10 min prima'], [30, '30 min prima'], [60, '1 ora prima'], [120, '2 ore prima'], [180, '3 ore prima'], [1440, '1 giorno prima'], [2880, '2 giorni prima']];
-const CLIENT_OPTS = [[0, 'Nessuno'], [120, '2 ore prima'], [240, '4 ore prima'], [1440, '1 giorno prima'], [2880, '2 giorni prima'], [4320, '3 giorni prima'], [10080, '1 settimana prima']];
+const STAFF_OPTS = [[0, 'Nessuno'], [10, '10 min prima'], [15, '15 min prima'], [30, '30 min prima'], [60, '1 ora prima'], [120, '2 ore prima'], [180, '3 ore prima'], [1440, '1 giorno prima'], [2880, '2 giorni prima']];
+const CLIENT_OPTS = [[0, 'Nessuno'], [10, '10 min prima'], [15, '15 min prima'], [30, '30 min prima'], [60, '1 ora prima'], [120, '2 ore prima'], [240, '4 ore prima'], [1440, '1 giorno prima'], [2880, '2 giorni prima'], [4320, '3 giorni prima'], [10080, '1 settimana prima']];
 const PAY_METHODS = [['contanti', 'Contanti'], ['carta', 'Carta'], ['bancomat', 'Bancomat'], ['satispay', 'Satispay'], ['bonifico', 'Bonifico'], ['altro', 'Altro']];
 const DURATIONS = [15, 30, 45, 60, 75, 90, 120, 150, 180, 240];
 
@@ -748,7 +748,7 @@ async function openForm(appt, opts = {}) {
         <div class="row"><select id="rS1">${options(STAFF_OPTS, rem.s1)}</select><select id="rS2">${options(STAFF_OPTS, rem.s2)}</select></div>
       </div>
       <div class="rem-box">
-        <div class="hint">💬 Per la cliente (messaggio al cellulare)</div>
+        <div class="hint">💬 Per la cliente — la notifica arriva a ${esc((S.team || []).find((m) => m.role === 'admin')?.full_name || "l'amministratrice")}, che lo invia dal WhatsApp Business del salone</div>
         <div class="row"><select id="rC1">${options(CLIENT_OPTS, rem.c1)}</select><select id="rC2">${options(CLIENT_OPTS, rem.c2)}</select></div>
       </div>
 
@@ -1030,7 +1030,7 @@ async function openDetail(id) {
         ${phone ? `<div style="display:flex;gap:8px">
           <a class="mini-btn" href="tel:${phone}" aria-label="Chiama">${ICON.phone}</a>
           <a class="mini-btn" href="https://wa.me/${phone.replace('+', '')}" target="_blank" rel="noopener" aria-label="WhatsApp">${ICON.chat}</a>
-          <button class="btn" style="min-height:40px;padding:8px 12px;font-size:14px" id="sendNow">${ICON.send} Invia promemoria</button>
+          ${isAdmin() ? `<button class="btn" style="min-height:40px;padding:8px 12px;font-size:14px" id="sendNow">${ICON.send} Invia promemoria</button>` : ''}
         </div>` : ''}
       </div>
     </div>
@@ -1126,6 +1126,7 @@ function prettyPhone(p) {
   return n.length === 10 ? `${n.slice(0, 3)} ${n.slice(3, 6)} ${n.slice(6)}` : (p || '');
 }
 async function openSendPrompt(id, slot, appt) {
+  if (!isAdmin()) return toast('I promemoria alle clienti li invia l\'amministratrice dal WhatsApp Business del salone');
   let a = appt;
   if (!a) { const r = await sb.from('appointments').select('*').eq('id', id).maybeSingle(); a = r.data; }
   if (!a) return toast('Appuntamento non trovato');
