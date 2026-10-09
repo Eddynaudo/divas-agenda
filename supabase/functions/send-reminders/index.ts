@@ -212,5 +212,12 @@ Deno.serve(async (req) => {
     await sb.from("change_requests").update({ requester_notified_at: new Date().toISOString() }).eq("id", cr.id);
   }
 
-  return Response.json({ processed: results.length, requests: (newReqs || []).length + (decided || []).length });
+  // ── Avvisi ai dipendenti (es. promemoria inviato alla cliente) ──
+  const { data: notices } = await sb.from("notices").select("*").is("pushed_at", null).limit(100);
+  for (const nt of notices || []) {
+    await pushTo(nt.user_id, { title: nt.title, body: nt.body || "", tag: `notice-${nt.id}`, url: "./#/notices" });
+    await sb.from("notices").update({ pushed_at: new Date().toISOString() }).eq("id", nt.id);
+  }
+
+  return Response.json({ processed: results.length, notices: (notices || []).length, requests: (newReqs || []).length + (decided || []).length });
 });

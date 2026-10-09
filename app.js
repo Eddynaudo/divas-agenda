@@ -262,6 +262,7 @@ async function boot() {
   refreshPushSubscription();
   refreshRequestBadge();
   sb.rpc('log_access').then(() => {}, () => {});
+  setTimeout(checkNotices, 800);
 }
 
 async function loadServices() {
@@ -449,6 +450,40 @@ function secureConfirm({ title, lines = [], okLabel = 'Conferma', danger = false
   });
 }
 
+
+/* ───────── Avvisi per i dipendenti (promemoria inviato) ───────── */
+let noticesShowing = false;
+async function checkNotices() {
+  if (!S.user || !S.unlocked || noticesShowing) return;
+  const { data } = await sb.from('notices').select('*').eq('user_id', S.user.id).is('acked_at', null).order('created_at').limit(20);
+  if (!data?.length) return;
+  noticesShowing = true;
+  for (const n of data) {
+    const res = await showNotice(n, data.length);
+    await sb.from('notices').update({ acked_at: new Date().toISOString() }).eq('id', n.id);
+    if (res === 'open' && n.appointment_id) { noticesShowing = false; openDetail(n.appointment_id); return; }
+  }
+  noticesShowing = false;
+}
+function showNotice(n, total) {
+  return new Promise((resolve) => {
+    const box = document.createElement('div');
+    box.className = 'confirm-backdrop';
+    box.innerHTML = `
+      <div class="confirm-card glass" role="alertdialog" aria-modal="true">
+        <div class="bio-icon" style="width:58px;height:58px;margin:0 auto 10px;color:var(--ok);border-color:rgba(127,209,166,.5);background:rgba(127,209,166,.12)" aria-hidden="true">${ICON.check}</div>
+        <h2>${esc(n.title.replace(/^✅\s*/, ''))}</h2>
+        <p style="text-align:center;margin:0 0 14px;font-size:15.5px">${esc(n.body || '')}</p>
+        <p class="note" style="text-align:center;margin:0 0 14px">Il promemoria è stato inviato alla cliente: l'appuntamento è confermato in agenda.</p>
+        <button class="btn gold block" data-ok>OK, ricevuto</button>
+        ${n.appointment_id ? '<button class="btn ghost block" data-open style="margin-top:8px">Apri appuntamento</button>' : ''}
+      </div>`;
+    document.body.appendChild(box);
+    $('[data-ok]', box).addEventListener('click', () => { box.remove(); resolve('ok'); });
+    $('[data-open]', box)?.addEventListener('click', () => { box.remove(); resolve('open'); });
+  });
+}
+
 /* ───────── Team (solo admin) ───────── */
 async function adminCall(action, payload = {}, retried = false) {
   // token sempre aggiornato prima di chiamare il server
@@ -554,6 +589,7 @@ function setTab(t) {
 function setTop(eyebrow, title) { $('#topEyebrow').textContent = eyebrow; $('#topTitle').textContent = title; }
 
 function handleDeepLink(hash) {
+  if ((hash || '').startsWith('#/notices')) { history.replaceState(null, '', location.pathname); checkNotices(); return; }
   if ((hash || '').startsWith('#/requests')) {
     history.replaceState(null, '', location.pathname);
     setTab('impostazioni');
@@ -572,7 +608,7 @@ if ('serviceWorker' in navigator) {
   });
 }
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden && S.user && S.unlocked && !sheetOpen) { setTab(S.tab); refreshRequestBadge(); }
+  if (!document.hidden && S.user && S.unlocked) { if (!sheetOpen) setTab(S.tab); refreshRequestBadge(); checkNotices(); }
 });
 
 /* ───────── Agenda ───────── */
@@ -1015,9 +1051,20 @@ async function openDetail(id) {
   const d = new Date(a.starts_at), end = new Date(d.getTime() + a.duration_min * 60000);
   const remLine = (rems || []).map((r) => {
     const icon = r.target === 'staff' ? '🔔' : '💬';
-    const state = r.status === 'pending' ? '' : r.status === 'sent' ? ' ✓' : r.status === 'skipped' ? ' (saltato)' : ' ⚠️';
-    return `<div>${icon} ${r.target === 'staff' ? 'Tu' : 'Cliente'} · ${optLabel(r.target === 'staff' ? STAFF_OPTS : CLIENT_OPTS, r.offset_min)}${state}</div>`;
+    let state = r.status === 'pending' ? '' : r.status === 'sent' ? ' ✓' : r.status === 'skipped' ? ' (saltato)' : ' ⚠️';
+    if (r.target === 'client' && r.sent_by) state = ` ✓ inviato da ${esc(memberName(r.sent_by).split(' ')[0])}${r.sent_at ? ' il ' + fmtShort(new Date(r.sent_at)) + ' ' + hm(new Date(r.sent_at)) : ''}`;
+    else if (r.target === 'client' && r.status === 'sent') state = ' · notifica arrivata all\'admin';
+    return `<div>${icon} ${r.target === 'staff' ? 'Operatrice' : 'Cliente'} · ${optLabel(r.target === 'staff' ? STAFF_OPTS : CLIENT_OPTS, r.offset_min)}${state}</div>`;
   }).join('') || '<span class="muted">Nessuno</span>';
+  let ackLine = '';
+  if (isAdmin()) {
+    const { data: nts } = await sb.from('notices').select('user_id, acked_at').eq('appointment_id', id).eq('kind', 'reminder_sent');
+    if (nts?.length) {
+      const seen = {};
+      nts.forEach((n) => { if (!seen[n.user_id] || n.acked_at) seen[n.user_id] = n.acked_at; });
+      ackLine = Object.entries(seen).map(([u, at]) => `${esc(memberName(u) || '—')} ${at ? '✓ visto' : '· non ancora visto'}`).join('<br>');
+    }
+  }
   const phone = normalizePhone(a.phone);
 
   openSheet(`
@@ -1040,6 +1087,7 @@ async function openDetail(id) {
       ${(S.team || []).length > 1 ? `<dt>Operatrice</dt><dd>${esc(memberName(a.assigned_to || a.user_id) || '—')}</dd>` : ''}
       ${a.notes ? `<dt>Note</dt><dd style="white-space:pre-wrap">${esc(a.notes)}</dd>` : ''}
       <dt>Promemoria</dt><dd>${remLine}</dd>
+      ${ackLine ? `<dt>Avviso team</dt><dd>${ackLine}</dd>` : ''}
       ${a.paid ? `<dt>Pagamento</dt><dd>${eur(a.paid_amount ?? a.price)} · ${esc(a.payment_method || '')}${a.paid_at ? ' · ' + fmtShort(new Date(a.paid_at)) : ''}</dd>` : ''}
     </dl>
     <div id="payBox"></div>
@@ -1143,8 +1191,13 @@ async function openSendPrompt(id, slot, appt) {
       <p class="note">Si apre WhatsApp (o Messaggi) con il testo già pronto: tocca solo "Invia".</p>
     </div>`, (root) => {
     const t = () => encodeURIComponent($('#msgText', root).value);
-    $('#sendWa', root).addEventListener('click', () => { window.open(`https://wa.me/${phone.replace('+', '')}?text=${t()}`, '_blank'); });
-    $('#sendSms', root).addEventListener('click', () => { location.href = `sms:${phone}${/iPhone|iPad|Mac/.test(navigator.userAgent) ? '&' : '?'}body=${t()}`; });
+    // registra l'invio e avvisa i dipendenti (dopo aver aperto WhatsApp/SMS, per non perdere il tocco)
+    const markSent = (channel) => {
+      sb.rpc('mark_client_reminder_sent', { p_appointment: a.id, p_slot: slot || 0, p_channel: channel })
+        .then(({ error }) => { if (error) fail(error); else toast('Promemoria segnato come inviato: il team è stato avvisato ✓'); });
+    };
+    $('#sendWa', root).addEventListener('click', () => { window.open(`https://wa.me/${phone.replace('+', '')}?text=${t()}`, '_blank'); markSent('whatsapp'); });
+    $('#sendSms', root).addEventListener('click', () => { markSent('sms'); setTimeout(() => { location.href = `sms:${phone}${/iPhone|iPad|Mac/.test(navigator.userAgent) ? '&' : '?'}body=${t()}`; }, 50); });
   });
 }
 
