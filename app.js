@@ -473,11 +473,11 @@ function showNotice(n, total) {
     box.className = 'confirm-backdrop';
     box.innerHTML = `
       <div class="confirm-card glass" role="alertdialog" aria-modal="true">
-        ${/^❌/.test(n.title) ? `<div class="bio-icon" style="width:58px;height:58px;margin:0 auto 10px;color:var(--danger);border-color:rgba(240,138,138,.5);background:rgba(240,138,138,.12)" aria-hidden="true">${ICON.close}</div>` : `<div class="bio-icon" style="width:58px;height:58px;margin:0 auto 10px;color:var(--ok);border-color:rgba(127,209,166,.5);background:rgba(127,209,166,.12)" aria-hidden="true">${ICON.check}</div>`}
-        <h2>${esc(n.title.replace(/^(✅|❌)\s*/, ''))}</h2>
+        ${n.kind === 'storage_alert' ? `<div class="bio-icon" style="width:58px;height:58px;margin:0 auto 10px;color:var(--warn);border-color:rgba(240,195,107,.55);background:rgba(240,195,107,.12);font-size:28px" aria-hidden="true">⚠️</div>` : /^❌/.test(n.title) ? `<div class="bio-icon" style="width:58px;height:58px;margin:0 auto 10px;color:var(--danger);border-color:rgba(240,138,138,.5);background:rgba(240,138,138,.12)" aria-hidden="true">${ICON.close}</div>` : `<div class="bio-icon" style="width:58px;height:58px;margin:0 auto 10px;color:var(--ok);border-color:rgba(127,209,166,.5);background:rgba(127,209,166,.12)" aria-hidden="true">${ICON.check}</div>`}
+        <h2>${esc(n.title.replace(/^(✅|❌|⚠️|🚨)\s*/u, ''))}</h2>
         <p style="text-align:center;margin:0 0 14px;font-size:15.5px">${esc(n.body || '')}</p>
-        <p class="note" style="text-align:center;margin:0 0 14px">${n.kind === 'request_decided' ? 'Eriola ha valutato la tua richiesta.' : 'Il promemoria è stato inviato alla cliente: l\'appuntamento è confermato in agenda.'}</p>
-        <button class="btn gold block" data-ok>OK, ricevuto</button>
+        <p class="note" style="text-align:center;margin:0 0 14px">${n.kind === 'storage_alert' ? 'Lo spazio dell\'archivio su Supabase si sta riempiendo: avvisa chi gestisce l\'app per ampliarlo prima che sia pieno.' : n.kind === 'request_decided' ? 'Eriola ha valutato la tua richiesta.' : 'Il promemoria è stato inviato alla cliente: l\'appuntamento è confermato in agenda.'}</p>
+        <button class="btn gold block" data-ok>${n.kind === 'storage_alert' ? 'Ho capito' : 'OK, ricevuto'}</button>
         ${n.appointment_id ? '<button class="btn ghost block" data-open style="margin-top:8px">Apri appuntamento</button>' : ''}
       </div>`;
     document.body.appendChild(box);
@@ -1925,6 +1925,20 @@ function confirmLeaveMagazzino(nextTab, fromButton) {
   });
 }
 
+/* ───────── Spazio archivio (admin e sotto-admin) ───────── */
+async function renderStorage(box) {
+  const { data, error } = await sb.rpc('storage_usage');
+  if (error || !data) { box.innerHTML = '<div class="muted">Non disponibile</div>'; return; }
+  const mb = (b) => (b / 1048576 < 10 ? (b / 1048576).toFixed(1) : Math.round(b / 1048576)).toString().replace('.', ',');
+  const bar = (label, used, limit) => {
+    const pct = Math.min(100, (100 * used) / limit);
+    const col = pct >= 85 ? 'var(--danger)' : pct >= 70 ? 'var(--warn)' : 'linear-gradient(90deg,#b8973c,var(--gold-hi))';
+    return `<div class="bar-row" style="grid-template-columns:110px 1fr 54px"><span>${label}</span><div class="bar"><i style="width:${Math.max(pct, 1.5)}%;background:${col}"></i></div><span>${pct.toFixed(0)}%</span></div>
+      <p class="note" style="margin:-4px 0 8px 0">${mb(used)} MB usati su ${mb(limit)} MB</p>`;
+  };
+  box.innerHTML = bar('Dati', data.db_bytes, data.db_limit) + bar('Foto e audio', data.files_bytes, data.files_limit);
+}
+
 /* ───────── Impostazioni ───────── */
 const SETTING_LABELS = {
   staff_r1: 'Promemoria operatrice 1', staff_r2: 'Promemoria operatrice 2', client_r1: 'Promemoria cliente 1', client_r2: 'Promemoria cliente 2',
@@ -2145,6 +2159,11 @@ async function renderSettings() {
       ${isAdmin() ? `<button class="btn gold block" id="addMember" style="margin-top:10px">${ICON.plus} Nuovo dipendente</button>` : '<p class="note" style="margin:8px 0 0">Puoi vedere gli account e inviare il link per reimpostare la password. Solo Eriola crea o elimina account.</p>'}
     </div>
     <div class="card glass">
+      <h3>Spazio archivio</h3>
+      <div id="storageBox"><div class="muted">Calcolo…</div></div>
+      <p class="note" style="margin:8px 0 0">Se lo spazio supera il 70% ricevete un avviso (tu e il sotto-admin), poi di nuovo all'85% e al 95%.</p>
+    </div>
+    <div class="card glass">
       <h3>Archivio attività</h3>
       <p class="note" style="margin:0 0 12px">Registro giornaliero di tutto quello che fanno i dipendenti (appuntamenti, incassi, clienti, foto, richieste, accessi). Consultabile e scaricabile in PDF.</p>
       <button class="btn gold block" id="openArchive">Apri archivio</button>
@@ -2198,6 +2217,7 @@ async function renderSettings() {
   });
   renderRequests($('#reqBox'));
   refreshRequestBadge();
+  if (admin) renderStorage($('#storageBox'));
   if (admin) { renderTeam($('#teamBox')); $('#addMember')?.addEventListener('click', openNewMemberSheet); $('#openArchive').addEventListener('click', openActivityArchive); }
 
   $('#saveDefaults').addEventListener('click', async () => {

@@ -71,16 +71,19 @@ Deno.serve(async (req) => {
   // impostazioni del salone (unica riga)
   const { data: salonSettings } = await sb.from("settings").select("*").limit(1).maybeSingle();
 
-  async function pushTo(userId: string, payload: unknown) {
-    if (!subsCache[userId]) {
-      // solo account attivi
+  const profCache: Record<string, any> = {};
+  // force = true solo per gli avvisi di sistema (es. archivio quasi pieno), che arrivano anche al sotto-admin
+  async function pushTo(userId: string, payload: unknown, force = false) {
+    if (!(userId in profCache)) {
       const { data: prof } = await sb.from("profiles").select("active, role").eq("user_id", userId).maybeSingle();
-      // account disattivati e sotto-admin non ricevono notifiche
-      if (prof && (!prof.active || prof.role === "subadmin")) { subsCache[userId] = []; }
-      else {
-        const { data } = await sb.from("push_subscriptions").select("*").eq("user_id", userId);
-        subsCache[userId] = data || [];
-      }
+      profCache[userId] = prof;
+    }
+    const prof = profCache[userId];
+    if (prof && !prof.active) return 0;                         // account disattivati: niente notifiche
+    if (prof && prof.role === "subadmin" && !force) return 0;   // sotto-admin: solo avvisi di sistema
+    if (!subsCache[userId]) {
+      const { data } = await sb.from("push_subscriptions").select("*").eq("user_id", userId);
+      subsCache[userId] = data || [];
     }
     let ok = 0;
     for (const s of subsCache[userId]) {
@@ -216,7 +219,7 @@ Deno.serve(async (req) => {
   // ── Avvisi ai dipendenti (es. promemoria inviato alla cliente) ──
   const { data: notices } = await sb.from("notices").select("*").is("pushed_at", null).limit(100);
   for (const nt of notices || []) {
-    await pushTo(nt.user_id, { title: nt.title, body: nt.body || "", tag: `notice-${nt.id}`, url: "./#/notices" });
+    await pushTo(nt.user_id, { title: nt.title, body: nt.body || "", tag: `notice-${nt.id}`, url: "./#/notices" }, nt.kind === "storage_alert");
     await sb.from("notices").update({ pushed_at: new Date().toISOString() }).eq("id", nt.id);
   }
 
