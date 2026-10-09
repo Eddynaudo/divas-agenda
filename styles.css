@@ -366,3 +366,6 @@ input::placeholder, textarea::placeholder { color: rgba(255,255,255,.45); font-w
 .sky::after { background: radial-gradient(120% 80% at 50% 0%, rgba(8,7,12,.30), rgba(8,7,12,.62) 70%, rgba(8,7,12,.85)); }
 .top-title strong, h1, h2, .day-summary h2 { text-shadow: 0 1px 10px rgba(0,0,0,.6); }
 .eyebrow { color: var(--gold-hi); }
+.log-row { display: grid; grid-template-columns: 52px 1fr; gap: 10px; padding: 11px 13px; align-items: start; }
+.log-time { font-family: 'Playfair Display', Georgia, serif; font-weight: 700; color: var(--gold-hi); font-size: 16px; }
+.log-text { font-size: 14px; color: #ece7f2; margin-top: 2px; overflow-wrap: anywhere; }

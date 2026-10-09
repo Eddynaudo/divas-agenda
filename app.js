@@ -261,6 +261,7 @@ async function boot() {
   handleDeepLink(location.hash);
   refreshPushSubscription();
   refreshRequestBadge();
+  sb.rpc('log_access').then(() => {}, () => {});
 }
 
 async function loadServices() {
@@ -1279,6 +1280,150 @@ async function renderCassa() {
   $$('.appt', view).forEach((c) => c.addEventListener('click', () => openDetail(c.dataset.id)));
 }
 
+
+/* ───────── Archivio attività (solo admin) ───────── */
+const fmtMoneyText = (t) => String(t || '').replace(/€ (\d+)\.(\d\d)/g, (m, a, b) => (b === '00' ? `€ ${a}` : `€ ${a},${b}`));
+let pdfLibs;
+function loadScript(src) {
+  return new Promise((res, rej) => { const sc = document.createElement('script'); sc.src = src; sc.onload = res; sc.onerror = rej; document.head.appendChild(sc); });
+}
+async function ensurePdfLibs() {
+  if (!pdfLibs) pdfLibs = loadScript('vendor/jspdf.umd.min.js').then(() => loadScript('vendor/jspdf.plugin.autotable.min.js'));
+  return pdfLibs;
+}
+async function logoDataUrl() {
+  const img = new Image(); img.src = 'img/logo.png';
+  await img.decode();
+  const c = document.createElement('canvas'); c.width = 240; c.height = 240;
+  c.getContext('2d').drawImage(img, 0, 0, 240, 240);
+  return c.toDataURL('image/png');
+}
+// testo compatibile con i font standard del PDF
+const pdfText = (t) => fmtMoneyText(t).replace(/→/g, '->').replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}️]/gu, '').replace(/€/g, 'EUR').trim();
+
+async function buildActivityPdf(day, rows, filterLabel) {
+  await ensurePdfLibs();
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit: 'mm', format: 'a4' });
+  const W = doc.internal.pageSize.getWidth();
+  try { doc.addImage(await logoDataUrl(), 'PNG', 14, 10, 22, 22); } catch {}
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(17); doc.setTextColor(20, 18, 28);
+  doc.text("Diva's Hairboutique", 40, 18);
+  doc.setFontSize(12); doc.setTextColor(150, 120, 40);
+  doc.text('Archivio attività', 40, 25);
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.setTextColor(60, 60, 70);
+  const dayLabel = day.toLocaleDateString('it-IT', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+  doc.text(`${dayLabel.charAt(0).toUpperCase() + dayLabel.slice(1)}  ·  ${pdfText(filterLabel)}`, 40, 31);
+  doc.setDrawColor(198, 168, 75); doc.setLineWidth(0.6); doc.line(14, 36, W - 14, 36);
+
+  const body = rows.map((r) => [
+    new Date(r.at).toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit' }),
+    pdfText(memberName(r.actor) || '—'),
+    pdfText(r.summary),
+  ]);
+  doc.autoTable({
+    startY: 41,
+    head: [['Ora', 'Persona', 'Attività']],
+    body: body.length ? body : [['', '', 'Nessuna attività registrata in questa giornata']],
+    styles: { font: 'helvetica', fontSize: 9.5, cellPadding: 2.4, textColor: [30, 30, 38], lineColor: [225, 220, 205], lineWidth: 0.2 },
+    headStyles: { fillColor: [24, 21, 32], textColor: [240, 214, 138], fontStyle: 'bold' },
+    alternateRowStyles: { fillColor: [250, 247, 238] },
+    columnStyles: { 0: { cellWidth: 16, fontStyle: 'bold' }, 1: { cellWidth: 36, fontStyle: 'bold' }, 2: { cellWidth: 'auto' } },
+    margin: { left: 14, right: 14 },
+  });
+
+  // riepilogo per persona
+  const per = {};
+  rows.forEach((r) => { const k = memberName(r.actor) || '—'; per[k] = (per[k] || 0) + 1; });
+  let y = doc.lastAutoTable.finalY + 8;
+  if (Object.keys(per).length) {
+    if (y > 265) { doc.addPage(); y = 20; }
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(11); doc.setTextColor(20, 18, 28);
+    doc.text('Riepilogo', 14, y);
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(10);
+    Object.entries(per).forEach(([k, n], i) => doc.text(`${pdfText(k)}: ${n} ${n === 1 ? 'attività' : 'attività'}`, 14, y + 6 + i * 5));
+  }
+  const pages = doc.getNumberOfPages();
+  for (let i = 1; i <= pages; i++) {
+    doc.setPage(i); doc.setFontSize(8); doc.setTextColor(140, 140, 150);
+    doc.text(`Generato il ${new Date().toLocaleString('it-IT')} · pagina ${i} di ${pages}`, W / 2, 290, { align: 'center' });
+  }
+  return doc;
+}
+
+async function openActivityArchive() {
+  const staff = (S.team || []).filter((m) => m.role !== 'admin');
+  const st = { day: startOfDay(new Date()), who: 'staff' };
+  openSheet(`
+    ${sheetHead('Archivio attività', 'Tutto quello che succede nell\'app, giorno per giorno')}
+    <div class="form">
+      <div class="week" style="margin:0">
+        <button class="week-nav" id="arPrev" aria-label="Giorno precedente">${ICON.left}</button>
+        <input type="date" id="arDate" style="flex:1">
+        <button class="week-nav" id="arNext" aria-label="Giorno successivo">${ICON.right}</button>
+      </div>
+      <label>Persona<select id="arWho">
+        <option value="staff">Tutti i dipendenti</option>
+        <option value="all">Tutti (dipendenti e io)</option>
+        ${(S.team || []).map((m) => `<option value="${m.user_id}">${esc(m.full_name || m.email)}${m.role === 'admin' ? ' (io)' : ''}</option>`).join('')}
+      </select></label>
+      <div class="actions">
+        <button class="btn gold" id="arView">Visualizza PDF</button>
+        <button class="btn" id="arDown">Scarica PDF</button>
+      </div>
+      <div id="arCount" class="note"></div>
+      <div id="arList" class="list"><div class="muted">Caricamento…</div></div>
+    </div>`, (root) => {
+    let rows = [];
+    const label = () => { const o = $('#arWho', root).selectedOptions[0]; return o ? o.textContent : ''; };
+    const load = async () => {
+      $('#arDate', root).value = ymd(st.day);
+      $('#arNext', root).disabled = st.day >= startOfDay(new Date());
+      $('#arList', root).innerHTML = '<div class="muted">Caricamento…</div>';
+      let q = sb.from('activity_log').select('*').gte('at', st.day.toISOString()).lt('at', addDays(st.day, 1).toISOString()).order('at');
+      if (st.who === 'staff') q = staff.length ? q.in('actor', staff.map((m) => m.user_id)) : q.eq('actor', '00000000-0000-0000-0000-000000000000');
+      else if (st.who !== 'all') q = q.eq('actor', st.who);
+      const { data, error } = await q;
+      if (error) return fail(error);
+      rows = data || [];
+      $('#arCount', root).textContent = `${rows.length} ${rows.length === 1 ? 'attività registrata' : 'attività registrate'}`;
+      $('#arList', root).innerHTML = rows.length ? rows.map((r) => `
+        <div class="log-row glass">
+          <span class="log-time">${hm(new Date(r.at))}</span>
+          <div><strong>${esc(memberName(r.actor) || '—')}</strong><div class="log-text">${esc(fmtMoneyText(r.summary))}</div></div>
+        </div>`).join('') : '<div class="empty glass"><div class="spark">✦</div><div class="serif">Nessuna attività</div><div class="muted">In questa giornata non risultano azioni.</div></div>';
+    };
+    const makePdf = async () => {
+      toast('Preparo il PDF…');
+      const doc = await buildActivityPdf(st.day, rows, label());
+      const name = `archivio-divas-${ymd(st.day)}.pdf`;
+      return { doc, name };
+    };
+    $('#arPrev', root).addEventListener('click', () => { st.day = addDays(st.day, -1); load(); });
+    $('#arNext', root).addEventListener('click', () => { st.day = addDays(st.day, 1); load(); });
+    $('#arDate', root).addEventListener('change', (e) => { if (!e.target.value) return; const [y, m, d] = e.target.value.split('-').map(Number); st.day = new Date(y, m - 1, d); load(); });
+    $('#arWho', root).addEventListener('change', (e) => { st.who = e.target.value; load(); });
+    $('#arView', root).addEventListener('click', async () => {
+      try {
+        const { doc } = await makePdf();
+        const url = doc.output('bloburl');
+        const w = window.open(url, '_blank');
+        if (!w) location.href = url;
+      } catch (e) { fail(e); }
+    });
+    $('#arDown', root).addEventListener('click', async () => {
+      try {
+        const { doc, name } = await makePdf();
+        const file = new File([doc.output('blob')], name, { type: 'application/pdf' });
+        if (/iPhone|iPad|Android/.test(navigator.userAgent) && navigator.canShare?.({ files: [file] })) {
+          await navigator.share({ files: [file], title: name });
+        } else doc.save(name);
+      } catch (e) { if (e?.name !== 'AbortError') fail(e); }
+    });
+    load();
+  });
+}
+
 /* ───────── Impostazioni ───────── */
 const SETTING_LABELS = {
   staff_r1: 'Promemoria operatrice 1', staff_r2: 'Promemoria operatrice 2', client_r1: 'Promemoria cliente 1', client_r2: 'Promemoria cliente 2',
@@ -1436,6 +1581,11 @@ async function renderSettings() {
       <h3>Team</h3>
       <div id="teamBox"></div>
       <button class="btn gold block" id="addMember" style="margin-top:10px">${ICON.plus} Nuovo dipendente</button>
+    </div>
+    <div class="card glass">
+      <h3>Archivio attività</h3>
+      <p class="note" style="margin:0 0 12px">Registro giornaliero di tutto quello che fanno i dipendenti (appuntamenti, incassi, clienti, foto, richieste, accessi). Consultabile e scaricabile in PDF.</p>
+      <button class="btn gold block" id="openArchive">Apri archivio</button>
     </div>` : ''}
 
     <div class="card glass form">
@@ -1483,7 +1633,7 @@ async function renderSettings() {
   });
   renderRequests($('#reqBox'));
   refreshRequestBadge();
-  if (admin) { renderTeam($('#teamBox')); $('#addMember').addEventListener('click', openNewMemberSheet); }
+  if (admin) { renderTeam($('#teamBox')); $('#addMember').addEventListener('click', openNewMemberSheet); $('#openArchive').addEventListener('click', openActivityArchive); }
 
   $('#saveDefaults').addEventListener('click', async () => {
     const next = {
