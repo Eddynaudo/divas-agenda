@@ -240,7 +240,7 @@ async function gate(event) {
   const { data: me, error } = await sb.from('profiles').select('*').eq('user_id', S.user.id).maybeSingle();
   if (error) { fail(error); return; }
   if (!me || !me.active) {
-    await sb.auth.signOut();
+    await sb.auth.signOut({ scope: 'local' });
     showAuth();
     $('#authMsg').textContent = 'Questo account non è abilitato. Rivolgiti all\'amministratrice del salone.';
     return;
@@ -341,7 +341,7 @@ async function unlock() {
 $('#unlockBtn').addEventListener('click', unlock);
 $('#lockPwdBtn').addEventListener('click', async () => {
   bio.write(null);
-  await sb.auth.signOut();
+  await sb.auth.signOut({ scope: 'local' });
   location.reload();
 });
 // richiudi dopo 5 minuti in background
@@ -450,11 +450,21 @@ function secureConfirm({ title, lines = [], okLabel = 'Conferma', danger = false
 }
 
 /* ───────── Team (solo admin) ───────── */
-async function adminCall(action, payload = {}) {
+async function adminCall(action, payload = {}, retried = false) {
+  // token sempre aggiornato prima di chiamare il server
+  const { data: sess } = await sb.auth.getSession();
+  if (!sess?.session || (sess.session.expires_at || 0) * 1000 < Date.now() + 60000) await sb.auth.refreshSession();
   const { data, error } = await sb.functions.invoke('admin-users', { body: { action, ...payload } });
   if (error) {
-    let m = error.message;
+    let m = error.message, status = error.context?.status;
     try { const j = await error.context.json(); m = j.error || m; } catch {}
+    // sessione non più valida (es. uscita da un altro dispositivo): rinnova e riprova una volta
+    if (!retried && (status === 401 || /Failed to send/i.test(m))) {
+      const { error: rErr } = await sb.auth.refreshSession();
+      if (!rErr) return adminCall(action, payload, true);
+      throw new Error('Sessione scaduta: esci e rientra nell\'app con la password.');
+    }
+    if (/Failed to send/i.test(m)) m = 'Connessione al server non riuscita. Controlla internet e riprova.';
     throw new Error(m);
   }
   if (data?.error) throw new Error(data.error);
@@ -1629,7 +1639,7 @@ async function renderSettings() {
   });
   $('#logout').addEventListener('click', async () => {
     if (!confirm('Uscire dall\'account su questo telefono?')) return;
-    bio.write(null); await sb.auth.signOut(); location.reload();
+    bio.write(null); await sb.auth.signOut({ scope: 'local' }); location.reload();
   });
   renderRequests($('#reqBox'));
   refreshRequestBadge();
