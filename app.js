@@ -392,6 +392,59 @@ function openPasswordSheet(fromRecovery) {
   });
 }
 
+
+/* ───────── Conferma di sicurezza (Face ID / impronta o password) ───────── */
+function secureConfirm({ title, lines = [], okLabel = 'Conferma', danger = false }) {
+  return new Promise((resolve) => {
+    const useBio = S.user && bio.enabledFor(S.user.id);
+    const box = document.createElement('div');
+    box.className = 'confirm-backdrop';
+    box.innerHTML = `
+      <div class="confirm-card glass" role="alertdialog" aria-modal="true" aria-labelledby="scTitle">
+        <div class="bio-icon" style="width:58px;height:58px;margin:0 auto 10px" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="10" rx="2.5"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5M12 14.5v2.5"/></svg>
+        </div>
+        <h2 id="scTitle">${esc(title)}</h2>
+        ${lines.length ? `<ul class="sc-list">${lines.map((l) => `<li>${esc(l)}</li>`).join('')}</ul>` : ''}
+        <p class="note" style="margin:0 0 10px;text-align:center">Per sicurezza conferma la tua identità.</p>
+        <form id="scForm" class="form" style="gap:10px">
+          <label class="${useBio ? 'hidden' : ''}" id="scPwdWrap">Password<input type="password" id="scPwd" autocomplete="current-password"></label>
+          <p class="auth-msg" id="scMsg" style="margin:0"></p>
+          <button class="btn ${danger ? 'danger' : 'gold'} block" id="scOk" type="submit">${useBio ? 'Conferma con Face ID / impronta' : esc(okLabel)}</button>
+          ${useBio ? '<button type="button" class="link" id="scUsePwd" style="text-align:center">Usa la password</button>' : ''}
+          <button type="button" class="btn ghost block" id="scCancel">Annulla</button>
+        </form>
+      </div>`;
+    document.body.appendChild(box);
+    addEyes(box);
+    let mode = useBio ? 'bio' : 'pwd';
+    const done = (v) => { box.remove(); resolve(v); };
+    $('#scCancel', box).addEventListener('click', () => done(false));
+    $('#scUsePwd', box)?.addEventListener('click', () => {
+      mode = 'pwd'; $('#scPwdWrap', box).classList.remove('hidden'); $('#scUsePwd', box).remove();
+      $('#scOk', box).textContent = okLabel; $('#scPwd', box).focus();
+    });
+    if (mode === 'pwd') setTimeout(() => $('#scPwd', box).focus(), 50);
+    $('#scForm', box).addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = $('#scOk', box); btn.disabled = true; $('#scMsg', box).textContent = '';
+      try {
+        if (mode === 'bio') {
+          await bio.verify();
+        } else {
+          const pwd = $('#scPwd', box).value;
+          if (!pwd) { $('#scMsg', box).textContent = 'Inserisci la password.'; return; }
+          const { error } = await sb.auth.signInWithPassword({ email: S.user.email, password: pwd });
+          if (error) { $('#scMsg', box).textContent = 'Password non corretta.'; return; }
+        }
+        done(true);
+      } catch {
+        $('#scMsg', box).textContent = 'Riconoscimento non riuscito: riprova o usa la password.';
+      } finally { if (box.isConnected) btn.disabled = false; }
+    });
+  });
+}
+
 /* ───────── Team (solo admin) ───────── */
 async function adminCall(action, payload = {}) {
   const { data, error } = await sb.functions.invoke('admin-users', { body: { action, ...payload } });
@@ -433,17 +486,17 @@ function openMemberSheet(u) {
       <button class="btn danger" id="mDel">${ICON.trash} Elimina account</button>
       <p class="note">Gli appuntamenti creati da questo account restano in agenda.</p>
     </div>`, (root) => {
-    const run = async (btn, fn, ok) => {
+    const run = async (btn, fn, ok, title, danger) => {
+      if (!(await secureConfirm({ title, lines: [`${u.full_name || u.email} (${u.email})`], okLabel: 'Conferma', danger }))) return;
       btn.disabled = true;
       try { await fn(); toast(ok); closeSheet(); await loadTeam(); renderSettings(); }
       catch (e) { toast('⚠️ ' + e.message); } finally { btn.disabled = false; }
     };
-    $('#mRename', root).addEventListener('click', (e) => run(e.currentTarget, () => adminCall('rename', { user_id: u.user_id, full_name: $('#mName', root).value }), 'Nome aggiornato'));
-    $('#mReset', root).addEventListener('click', (e) => run(e.currentTarget, () => adminCall('reset_password', { user_id: u.user_id, password: $('#mPwd', root).value }), 'Password impostata: comunicala al dipendente'));
-    $('#mToggle', root).addEventListener('click', (e) => run(e.currentTarget, () => adminCall('set_active', { user_id: u.user_id, active: !u.active }), u.active ? 'Account disattivato' : 'Account riattivato'));
+    $('#mRename', root).addEventListener('click', (e) => run(e.currentTarget, () => adminCall('rename', { user_id: u.user_id, full_name: $('#mName', root).value }), 'Nome aggiornato', 'Cambiare il nome del dipendente?'));
+    $('#mReset', root).addEventListener('click', (e) => run(e.currentTarget, () => adminCall('reset_password', { user_id: u.user_id, password: $('#mPwd', root).value }), 'Password impostata: comunicala al dipendente', 'Impostare una nuova password per questo account?'));
+    $('#mToggle', root).addEventListener('click', (e) => run(e.currentTarget, () => adminCall('set_active', { user_id: u.user_id, active: !u.active }), u.active ? 'Account disattivato' : 'Account riattivato', u.active ? 'Disattivare questo account?' : 'Riattivare questo account?', u.active));
     $('#mDel', root).addEventListener('click', (e) => {
-      if (!confirm(`Eliminare definitivamente l'account di ${u.full_name || u.email}?`)) return;
-      run(e.currentTarget, () => adminCall('delete', { user_id: u.user_id }), 'Account eliminato');
+      run(e.currentTarget, () => adminCall('delete', { user_id: u.user_id }), 'Account eliminato', 'Eliminare definitivamente questo account?', true);
     });
   });
 }
@@ -461,6 +514,7 @@ function openNewMemberSheet() {
     $('#nmPwd', root).value = Math.random().toString(36).slice(2, 6) + '-' + Math.random().toString(36).slice(2, 6) + '!' ;
     $('#nmForm', root).addEventListener('submit', async (e) => {
       e.preventDefault();
+      if (!(await secureConfirm({ title: 'Creare il nuovo account?', lines: [`${$('#nmName', root).value} · ${$('#nmEmail', root).value}`], okLabel: 'Crea account' }))) return;
       const btn = $('#nmSave', root); btn.disabled = true;
       try {
         await adminCall('create', { full_name: $('#nmName', root).value, email: $('#nmEmail', root).value, password: $('#nmPwd', root).value });
@@ -1275,7 +1329,7 @@ async function submitChange(payload) {
   if (!lines.length) { toast('Nessuna modifica da salvare'); return false; }
   const list = lines.map((l) => '• ' + l).join('\n');
   if (isAdmin()) {
-    if (!confirm(`Confermi queste modifiche?\n\n${list}`)) return false;
+    if (!(await secureConfirm({ title: 'Confermi queste modifiche?', lines, okLabel: 'Conferma e salva' }))) return false;
     await applyChange(payload);
     toast('Modifiche salvate ✨');
   } else {
@@ -1316,8 +1370,7 @@ async function renderRequests(box) {
   $$('.req', box).forEach((el) => {
     const r = data.find((x) => x.id === el.dataset.id);
     const decide = async (approve) => {
-      const lines = describeChange(r.payload).map((l) => '• ' + l).join('\n');
-      if (!confirm(`${approve ? 'Approvare' : 'Rifiutare'} la richiesta di ${memberName(r.requested_by) || 'un dipendente'}?\n\n${lines}`)) return;
+      if (!(await secureConfirm({ title: `${approve ? 'Approvare' : 'Rifiutare'} la richiesta di ${memberName(r.requested_by) || 'un dipendente'}?`, lines: describeChange(r.payload), okLabel: approve ? 'Approva' : 'Rifiuta', danger: !approve }))) return;
       try {
         if (approve) await applyChange(r.payload);
         const { error } = await sb.from('change_requests').update({ status: approve ? 'approved' : 'rejected', decided_by: S.user.id, decided_at: new Date().toISOString() }).eq('id', r.id);
@@ -1410,7 +1463,10 @@ async function renderSettings() {
     if (e.target.checked) {
       try { await bio.enable(); toast('Face ID / impronta attivati ✨'); }
       catch { e.target.checked = false; toast('Attivazione annullata'); }
-    } else { bio.write(null); toast('Accesso biometrico disattivato'); }
+    } else {
+      if (isAdmin() && !(await secureConfirm({ title: 'Disattivare Face ID / impronta su questo telefono?', okLabel: 'Disattiva', danger: true }))) { e.target.checked = true; return; }
+      bio.write(null); toast('Accesso biometrico disattivato');
+    }
     renderSettings();
   });
   $('#pushBtn').addEventListener('click', async () => { await enablePush(true); renderSettings(); });
