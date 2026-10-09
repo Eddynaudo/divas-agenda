@@ -278,7 +278,9 @@ async function loadTeam() {
   const { data } = await sb.from('profiles').select('user_id, full_name, email, role, active').order('role').order('full_name');
   S.team = data || [];
 }
-const isAdmin = () => S.me?.role === 'admin';
+const isAdmin = () => S.me?.role === 'admin';            // Eriola: approvazioni, account, promemoria clienti
+const isSub = () => S.me?.role === 'subadmin';            // sotto-admin: modifica tutto con conferma di sicurezza
+const isManager = () => isAdmin() || isSub();
 const memberName = (id) => { const m = (S.team || []).find((x) => x.user_id === id); return m ? (m.full_name || m.email) : ''; };
 
 /* ───────── Face ID / impronta (WebAuthn, sblocco locale) ───────── */
@@ -509,44 +511,51 @@ async function renderTeam(box) {
   box.innerHTML = '<div class="muted">Caricamento…</div>';
   let users = [];
   try { users = (await adminCall('list')).users; } catch (e) { box.innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
+  const roleBadge = (u) => u.role === 'admin' ? '<span class="badge info">Admin</span>' : u.role === 'subadmin' ? '<span class="badge info">Sotto-admin</span>' : '';
   box.innerHTML = users.map((u) => `
     <div class="member ${u.active ? '' : 'off'}" data-id="${u.user_id}">
       <div class="avatar">${esc(initials(u.full_name || u.email))}</div>
-      <div class="info"><strong>${esc(u.full_name || '—')} ${u.role === 'admin' ? '<span class="badge info">Admin</span>' : u.active ? '' : '<span class="badge danger">Disattivato</span>'}</strong>
+      <div class="info"><strong>${esc(u.full_name || '—')} ${roleBadge(u)} ${u.active ? '' : '<span class="badge danger">Disattivato</span>'}</strong>
         <small>${esc(u.email)}${u.last_sign_in_at ? ' · ultimo accesso ' + fmtShort(new Date(u.last_sign_in_at)) : ' · mai entrato'}</small></div>
-      ${u.role === 'admin' ? '' : `<button class="mini-btn" data-act aria-label="Gestisci">${ICON.edit}</button>`}
+      ${u.user_id === S.user.id ? '' : `<button class="mini-btn" data-act aria-label="Gestisci">${ICON.edit}</button>`}
     </div>`).join('');
   $$('[data-act]', box).forEach((b) => b.addEventListener('click', () => {
     const u = users.find((x) => x.user_id === b.closest('.member').dataset.id);
     openMemberSheet(u);
   }));
 }
+// reimposta password: arriva un'email all'utente, che sceglie lui la nuova password
+async function sendPasswordReset(u) {
+  if (!(await secureConfirm({ title: 'Inviare il link per reimpostare la password?', lines: [`${u.full_name || u.email} (${u.email})`, 'La nuova password la sceglierà la persona, dal link nell\'email'], okLabel: 'Sì, invia', identity: isSub() }))) return;
+  const { error } = await sb.auth.resetPasswordForEmail(u.email, { redirectTo: location.origin + location.pathname });
+  if (error) return fail(/rate|seconds/i.test(error.message) ? { message: 'Troppe email in poco tempo: riprova tra qualche minuto' } : error);
+  toast(`Email inviata a ${u.email} ✉️`);
+}
 function openMemberSheet(u) {
+  const full = isAdmin() && u.role !== 'admin'; // solo Eriola gestisce gli account (tranne il proprio)
   openSheet(`
     ${sheetHead(esc(u.full_name || u.email), esc(u.email))}
     <div class="form">
-      <label>Nome<input id="mName" value="${esc(u.full_name || '')}"></label>
-      <button class="btn" id="mRename">Salva nome</button>
+      ${full ? `<label>Nome<input id="mName" value="${esc(u.full_name || '')}"></label>
+      <button class="btn" id="mRename">Salva nome</button>` : ''}
       <div class="section-t">Password</div>
-      <label>Nuova password temporanea<input id="mPwd" type="password" minlength="8" placeholder="min 8 caratteri" autocomplete="new-password"></label>
-      <button class="btn" id="mReset">Imposta nuova password</button>
-      <div class="section-t">Accesso</div>
+      <p class="note" style="margin:0">Invia un'email con il link per reimpostare la password: la nuova password la sceglie ${esc((u.full_name || 'la persona').split(' ')[0])}, non tu.</p>
+      <button class="btn gold" id="mReset">✉️ Invia link per reimpostare la password</button>
+      ${full ? `<div class="section-t">Accesso</div>
       <button class="btn ${u.active ? '' : 'ok'}" id="mToggle">${u.active ? 'Disattiva account (non potrà più entrare)' : 'Riattiva account'}</button>
       <button class="btn danger" id="mDel">${ICON.trash} Elimina account</button>
-      <p class="note">Gli appuntamenti creati da questo account restano in agenda.</p>
+      <p class="note">Gli appuntamenti creati da questo account restano in agenda.</p>` : ''}
     </div>`, (root) => {
     const run = async (btn, fn, ok, title, danger) => {
-      if (!(await secureConfirm({ title, lines: [`${u.full_name || u.email} (${u.email})`], okLabel: 'Sì, conferma', danger, identity: false }))) return;
+      if (!(await secureConfirm({ title, lines: [`${u.full_name || u.email} (${u.email})`], okLabel: 'Sì, conferma', danger, identity: isSub() }))) return;
       btn.disabled = true;
       try { await fn(); toast(ok); closeSheet(); await loadTeam(); renderSettings(); }
       catch (e) { toast('⚠️ ' + e.message); } finally { btn.disabled = false; }
     };
-    $('#mRename', root).addEventListener('click', (e) => run(e.currentTarget, () => adminCall('rename', { user_id: u.user_id, full_name: $('#mName', root).value }), 'Nome aggiornato', 'Cambiare il nome del dipendente?'));
-    $('#mReset', root).addEventListener('click', (e) => run(e.currentTarget, () => adminCall('reset_password', { user_id: u.user_id, password: $('#mPwd', root).value }), 'Password impostata: comunicala al dipendente', 'Impostare una nuova password per questo account?'));
-    $('#mToggle', root).addEventListener('click', (e) => run(e.currentTarget, () => adminCall('set_active', { user_id: u.user_id, active: !u.active }), u.active ? 'Account disattivato' : 'Account riattivato', u.active ? 'Disattivare questo account?' : 'Riattivare questo account?', u.active));
-    $('#mDel', root).addEventListener('click', (e) => {
-      run(e.currentTarget, () => adminCall('delete', { user_id: u.user_id }), 'Account eliminato', 'Eliminare definitivamente questo account?', true);
-    });
+    $('#mReset', root).addEventListener('click', () => sendPasswordReset(u));
+    $('#mRename', root)?.addEventListener('click', (e) => run(e.currentTarget, () => adminCall('rename', { user_id: u.user_id, full_name: $('#mName', root).value }), 'Nome aggiornato', 'Cambiare il nome?'));
+    $('#mToggle', root)?.addEventListener('click', (e) => run(e.currentTarget, () => adminCall('set_active', { user_id: u.user_id, active: !u.active }), u.active ? 'Account disattivato' : 'Account riattivato', u.active ? 'Disattivare questo account?' : 'Riattivare questo account?', u.active));
+    $('#mDel', root)?.addEventListener('click', (e) => run(e.currentTarget, () => adminCall('delete', { user_id: u.user_id }), 'Account eliminato', 'Eliminare definitivamente questo account?', true));
   });
 }
 function openNewMemberSheet() {
@@ -563,7 +572,7 @@ function openNewMemberSheet() {
     $('#nmPwd', root).value = Math.random().toString(36).slice(2, 6) + '-' + Math.random().toString(36).slice(2, 6) + '!' ;
     $('#nmForm', root).addEventListener('submit', async (e) => {
       e.preventDefault();
-      if (!(await secureConfirm({ title: 'Creare il nuovo account?', lines: [`${$('#nmName', root).value} · ${$('#nmEmail', root).value}`], okLabel: 'Sì, crea', identity: false }))) return;
+      if (!(await secureConfirm({ title: 'Creare il nuovo account?', lines: [`${$('#nmName', root).value} · ${$('#nmEmail', root).value}`], okLabel: 'Sì, crea', identity: isSub() }))) return;
       const btn = $('#nmSave', root); btn.disabled = true;
       try {
         await adminCall('create', { full_name: $('#nmName', root).value, email: $('#nmEmail', root).value, password: $('#nmPwd', root).value });
@@ -581,7 +590,7 @@ $('#todayBtn').addEventListener('click', () => { S.sel = startOfDay(new Date());
 
 function setTab(t, force) {
   // dipendente che esce dal Magazzino con modifiche in bozza: "Sei sicuro?"
-  if (!force && S.tab === 'magazzino' && t !== 'magazzino' && !isAdmin() && draftCount()) { confirmLeaveMagazzino(t); return; }
+  if (!force && S.tab === 'magazzino' && t !== 'magazzino' && !isManager() && draftCount()) { confirmLeaveMagazzino(t); return; }
   S.tab = t;
   $$('.tabbar button').forEach((b) => b.classList.toggle('active', b.dataset.tab === t));
   $('#fab').classList.toggle('hidden', t === 'impostazioni');
@@ -806,7 +815,7 @@ async function openForm(appt, opts = {}) {
       const extra = [...selSvcs].filter((n) => !S.services.some((s) => s.name === n));
       grid.innerHTML = [...S.services.map((s) => s.name), ...extra].map((n) =>
         `<button type="button" class="svc ${selSvcs.has(n) ? 'on' : ''}" data-n="${esc(n)}"><span class="sw" style="background:${svcColor(n)}"></span>${esc(n)}</button>`).join('')
-        + (!isAdmin() ? '' : `<button type="button" class="svc add" id="addSvc">${ICON.plus.replace('<svg', '<svg style="width:15px;height:15px"')} Aggiungi</button>`);
+        + (!isManager() ? '' : `<button type="button" class="svc add" id="addSvc">${ICON.plus.replace('<svg', '<svg style="width:15px;height:15px"')} Aggiungi</button>`);
       $$('.svc[data-n]', grid).forEach((b) => b.addEventListener('click', () => {
         const n = b.dataset.n; selSvcs.has(n) ? selSvcs.delete(n) : selSvcs.add(n); renderSvcs(); autoPrice();
       }));
@@ -916,7 +925,7 @@ async function upsertClient(name, phone) {
   if (p) {
     const { data: ex } = await sb.from('clients').select('id,name').eq('phone', p).limit(1);
     if (ex?.length) {
-      if (ex[0].name !== name && isAdmin()) await sb.from('clients').update({ name }).eq('id', ex[0].id);
+      if (ex[0].name !== name && isManager()) await sb.from('clients').update({ name }).eq('id', ex[0].id);
       return ex[0].id;
     }
     const { data, error } = await sb.from('clients').insert({ name, phone: p }).select().single();
@@ -1059,7 +1068,7 @@ async function openDetail(id) {
     return `<div>${icon} ${r.target === 'staff' ? 'Operatrice' : 'Cliente'} · ${optLabel(r.target === 'staff' ? STAFF_OPTS : CLIENT_OPTS, r.offset_min)}${state}</div>`;
   }).join('') || '<span class="muted">Nessuno</span>';
   let ackLine = '';
-  if (isAdmin()) {
+  if (isManager()) {
     const { data: nts } = await sb.from('notices').select('user_id, acked_at').eq('appointment_id', id).eq('kind', 'reminder_sent');
     if (nts?.length) {
       const seen = {};
@@ -1209,7 +1218,7 @@ async function renderClients() {
   const view = $('#view');
   view.innerHTML = `<div style="display:flex;gap:8px;align-items:center" class="search">
       <input type="search" id="cq" placeholder="Cerca per nome o numero…" value="${esc(S.clientQuery)}">
-      ${isAdmin() ? `<button class="btn gold" id="newClient" style="flex:none;padding:10px 14px">${ICON.plus} Nuova</button>` : ''}
+      ${isManager() ? `<button class="btn gold" id="newClient" style="flex:none;padding:10px 14px">${ICON.plus} Nuova</button>` : ''}
     </div><div class="list" id="clist"><div class="muted">Caricamento…</div></div>`;
   $('#newClient')?.addEventListener('click', () => openClientForm());
   const [{ data: clients, error }, { data: appts }] = await Promise.all([
@@ -1256,29 +1265,29 @@ async function openClient(c, s = {}) {
       <div class="stat glass"><small>Ultima</small><b style="font-size:18px">${s?.last ? fmtShort(s.last) : '—'}</b></div>
     </div>
     <div class="form">
-      ${isAdmin() ? '' : '<p class="note" style="margin:0">Solo l\'amministratrice può modificare o eliminare le schede clienti.</p>'}
-      <label>Nome<input id="cName" value="${esc(c.name)}" ${isAdmin() ? '' : 'disabled'}></label>
-      <label>Cellulare<input id="cPhone" type="tel" value="${esc(c.phone || '')}" ${isAdmin() ? '' : 'disabled'}></label>
-      <label>Note cliente<textarea id="cNotes" placeholder="Formula colore abituale, preferenze…" ${isAdmin() ? '' : 'disabled'}>${esc(c.notes || '')}</textarea></label>
+      ${isManager() ? '' : '<p class="note" style="margin:0">Solo l\'amministratrice può modificare o eliminare le schede clienti.</p>'}
+      <label>Nome<input id="cName" value="${esc(c.name)}" ${isManager() ? '' : 'disabled'}></label>
+      <label>Cellulare<input id="cPhone" type="tel" value="${esc(c.phone || '')}" ${isManager() ? '' : 'disabled'}></label>
+      <label>Note cliente<textarea id="cNotes" placeholder="Formula colore abituale, preferenze…" ${isManager() ? '' : 'disabled'}>${esc(c.notes || '')}</textarea></label>
       <div class="actions">
-        ${isAdmin() ? '<button class="btn gold" id="cSave">Salva</button>' : ''}
-        <button class="btn ${isAdmin() ? '' : 'full'}" id="cNew">${ICON.plus} Appuntamento</button>
+        ${isManager() ? '<button class="btn gold" id="cSave">Salva</button>' : ''}
+        <button class="btn ${isManager() ? '' : 'full'}" id="cNew">${ICON.plus} Appuntamento</button>
       </div>
     </div>
     <div class="section-t" style="margin:20px 0 10px">Storico</div>
     <div class="list">${(hist || []).length ? hist.map(apptCard).join('') : '<div class="muted">Nessun appuntamento</div>'}</div>
-    ${isAdmin() ? `<button class="btn danger block" id="cDel" style="margin-top:16px">${ICON.trash} Elimina cliente</button>` : ''}
+    ${isManager() ? `<button class="btn danger block" id="cDel" style="margin-top:16px">${ICON.trash} Elimina cliente</button>` : ''}
   `, (root) => {
     $$('.appt', root).forEach((el) => el.addEventListener('click', () => openDetail(el.dataset.id)));
     $('#cNew', root).addEventListener('click', () => openForm(null, { name: c.name, phone: c.phone, date: S.sel }));
     $('#cSave', root)?.addEventListener('click', async () => {
-      if (!confirm('Confermi le modifiche alla scheda cliente?')) return;
+      if (!(await secureConfirm({ title: 'Salvare le modifiche alla scheda cliente?', lines: [$('#cName', root).value], okLabel: 'Sì, salva', identity: isSub() }))) return;
       const { error } = await sb.from('clients').update({ name: $('#cName', root).value.trim(), phone: normalizePhone($('#cPhone', root).value) || null, notes: $('#cNotes', root).value.trim() || null }).eq('id', c.id);
       if (error) return fail(error.code === '23505' ? { message: 'Esiste già una cliente con questo numero' } : error);
       toast('Cliente aggiornata ✨'); closeSheet(); renderClients();
     });
     $('#cDel', root)?.addEventListener('click', async () => {
-      if (!confirm(`Eliminare ${c.name} dalla rubrica? Gli appuntamenti restano in agenda.`)) return;
+      if (!(await secureConfirm({ title: 'Eliminare la cliente dalla rubrica?', lines: [`${c.name} — gli appuntamenti restano in agenda`], okLabel: 'Sì, elimina', danger: true, identity: isSub() }))) return;
       const { error } = await sb.from('clients').delete().eq('id', c.id);
       if (error) return fail(error);
       closeSheet(); renderClients();
@@ -1297,7 +1306,7 @@ function openClientForm() {
     </form>`, (root) => {
     $('#ncForm', root).addEventListener('submit', async (e) => {
       e.preventDefault();
-      if (!confirm('Confermi la creazione della nuova cliente?')) return;
+      if (!(await secureConfirm({ title: 'Creare la nuova cliente?', lines: [$('#ncName', root).value], okLabel: 'Sì, crea', identity: isSub() }))) return;
       const { error } = await sb.from('clients').insert({
         name: $('#ncName', root).value.trim(), phone: normalizePhone($('#ncPhone', root).value) || null, notes: $('#ncNotes', root).value.trim() || null,
       });
@@ -1425,7 +1434,7 @@ async function buildActivityPdf(day, rows, filterLabel) {
 }
 
 async function openActivityArchive() {
-  const staff = (S.team || []).filter((m) => m.role !== 'admin');
+  const staff = (S.team || []).filter((m) => m.role === 'staff');
   const st = { day: startOfDay(new Date()), who: 'staff' };
   openSheet(`
     ${sheetHead('Archivio attività', 'Tutto quello che succede nell\'app, giorno per giorno')}
@@ -1437,8 +1446,8 @@ async function openActivityArchive() {
       </div>
       <label>Persona<select id="arWho">
         <option value="staff">Tutti i dipendenti</option>
-        <option value="all">Tutti (dipendenti e io)</option>
-        ${(S.team || []).map((m) => `<option value="${m.user_id}">${esc(m.full_name || m.email)}${m.role === 'admin' ? ' (io)' : ''}</option>`).join('')}
+        <option value="all">Tutti (compresi admin)</option>
+        ${(S.team || []).map((m) => `<option value="${m.user_id}">${esc(m.full_name || m.email)}${m.user_id === S.user.id ? ' (io)' : m.role === 'admin' ? ' (admin)' : m.role === 'subadmin' ? ' (sotto-admin)' : ''}</option>`).join('')}
       </select></label>
       <div class="actions">
         <button class="btn gold" id="arView">Visualizza PDF</button>
@@ -1608,9 +1617,9 @@ async function renderMagazzino() {
       <button data-v="groups" class="${mode === 'groups' ? 'on' : ''}">Per gruppo</button>
       <button data-v="list" class="${mode === 'list' ? 'on' : ''}">Elenco</button>
     </div>
-    <p class="note" style="margin:0 2px 10px">${total} prodotti in magazzino${!isAdmin() ? ' · le tue modifiche vanno approvate da Eriola' : ''}</p>
+    <p class="note" style="margin:0 2px 10px">${total} prodotti in magazzino${!isManager() ? ' · le tue modifiche vanno approvate da Eriola' : ''}</p>
     ${body}
-    ${!isAdmin() && draftCount() ? `<div class="draft-bar glass"><span><strong>${draftCount()} ${draftCount() === 1 ? 'modifica' : 'modifiche'} in bozza</strong><small>Non ancora inviate all'amministratrice</small></span><button class="btn gold" id="sendDraft">Invia</button></div>` : ''}`;
+    ${!isManager() && draftCount() ? `<div class="draft-bar glass"><span><strong>${draftCount()} ${draftCount() === 1 ? 'modifica' : 'modifiche'} in bozza</strong><small>Non ancora inviate all'amministratrice</small></span><button class="btn gold" id="sendDraft">Invia</button></div>` : ''}`;
 
   const qi = $('#invQ');
   qi.addEventListener('input', () => { S.invQuery = qi.value; clearTimeout(S._invT); S._invT = setTimeout(() => { renderMagazzino().then(() => { const n = $('#invQ'); n.focus(); n.setSelectionRange(n.value.length, n.value.length); }); }, 250); });
@@ -1628,7 +1637,7 @@ async function renderMagazzino() {
 
 function openProductForm(p, opts = {}) {
   const isNew = !p;
-  const admin = isAdmin();
+  const admin = isManager();
   const review = !!opts.onReview; // l'admin modifica una proposta prima di approvarla
   const v = p ? { ...p } : { name: '', group_name: S.invLastGroup || (S.products?.[0]?.group_name || ''), specs: '', size: '', price: null, stock: null, image_path: null };
   const groups = [...new Set((S.products || []).map((x) => x.group_name).filter(Boolean))].sort();
@@ -1684,7 +1693,7 @@ function openProductForm(p, opts = {}) {
       S.invLastGroup = after.group_name;
       if (review) { opts.onReview(after); closeSheet(); return; }
       if (admin) {
-        if (!(await secureConfirm({ title: isNew ? 'Aggiungere il prodotto?' : 'Salvare le modifiche?', lines: [productLabel(after)], okLabel: 'Sì, salva', identity: false }))) return;
+        if (!(await secureConfirm({ title: isNew ? 'Aggiungere il prodotto?' : 'Salvare le modifiche?', lines: [productLabel(after)], okLabel: 'Sì, salva', identity: isSub() }))) return;
         const r = isNew ? await sb.from('products').insert(after) : await sb.from('products').update(after).eq('id', p.id);
         if (r.error) return fail(r.error);
         await loadProducts(); closeSheet(); toast('Magazzino aggiornato ✨'); renderMagazzino();
@@ -1704,7 +1713,7 @@ function openProductForm(p, opts = {}) {
     });
     $('#pDel', root)?.addEventListener('click', async () => {
       if (admin) {
-        if (!(await secureConfirm({ title: 'Eliminare il prodotto?', lines: [productLabel(p)], okLabel: 'Sì, elimina', danger: true, identity: false }))) return;
+        if (!(await secureConfirm({ title: 'Eliminare il prodotto?', lines: [productLabel(p)], okLabel: 'Sì, elimina', danger: true, identity: isSub() }))) return;
         const { error } = await sb.from('products').delete().eq('id', p.id);
         if (error) return fail(error);
         await loadProducts(); closeSheet(); toast('Prodotto eliminato'); renderMagazzino();
@@ -1819,8 +1828,8 @@ async function submitChange(payload) {
   const lines = describeChange(payload);
   if (!lines.length) { toast('Nessuna modifica da salvare'); return false; }
   const list = lines.map((l) => '• ' + l).join('\n');
-  if (isAdmin()) {
-    if (!(await secureConfirm({ title: 'Confermi queste modifiche?', lines, okLabel: 'Sì, salva', identity: false }))) return false;
+  if (isManager()) {
+    if (!(await secureConfirm({ title: 'Confermi queste modifiche?', lines, okLabel: 'Sì, salva', identity: isSub() }))) return false;
     await applyChange(payload);
     toast('Modifiche salvate ✨');
   } else {
@@ -1840,10 +1849,10 @@ async function refreshRequestBadge() {
   if (S.pendingCount) tab.insertAdjacentHTML('beforeend', `<span class="tab-dot">${S.pendingCount}</span>`);
 }
 async function renderRequests(box) {
-  const q = sb.from('change_requests').select('*').order('created_at', { ascending: false }).limit(isAdmin() ? 30 : 10);
-  const { data } = isAdmin() ? await q.eq('status', 'pending') : await q.eq('requested_by', S.user.id);
+  const q = sb.from('change_requests').select('*').order('created_at', { ascending: false }).limit(isManager() ? 30 : 10);
+  const { data } = isManager() ? await q.eq('status', 'pending') : await q.eq('requested_by', S.user.id);
   if (!data?.length) {
-    box.closest('.card')?.classList.toggle('hidden', !isAdmin() ? true : false);
+    box.closest('.card')?.classList.toggle('hidden', !isManager());
     box.innerHTML = '<div class="muted" style="font-size:14px">Nessuna richiesta in attesa ✨</div>';
     return;
   }
@@ -1868,10 +1877,11 @@ async function renderRequests(box) {
   const draw = () => {
     box.innerHTML = data.map((r) => `
       <div class="req" data-id="${r.id}">
-        <div class="who-line"><strong>${esc(isAdmin() ? memberName(r.requested_by) || 'Dipendente' : 'La tua richiesta')}</strong>
+        <div class="who-line"><strong>${esc(isManager() ? memberName(r.requested_by) || 'Dipendente' : 'La tua richiesta')}</strong>
           <span class="muted">${when(r.created_at)}</span></div>
         ${itemsHtml(r)}
         ${isAdmin() ? `<div class="actions"><button class="btn ok" data-ok>${ICON.check} Approva</button><button class="btn danger" data-no>Rifiuta</button></div>`
+          : isSub() ? '<span class="badge warn">In attesa dell\'approvazione di Eriola</span>'
           : `<span class="badge ${r.status === 'approved' ? 'ok' : r.status === 'rejected' ? 'danger' : 'warn'}">${r.status === 'approved' ? 'Approvata' : r.status === 'rejected' ? 'Non approvata' : 'In attesa'}</span>`}
       </div>`).join('');
     if (!isAdmin()) return;
@@ -1916,9 +1926,9 @@ async function renderRequests(box) {
 }
 
 async function renderSettings() {
-  setTop(isAdmin() ? 'Amministratrice' : 'Il tuo profilo', 'Impostazioni');
+  setTop(isAdmin() ? 'Amministratrice' : isSub() ? 'Sotto-amministratore' : 'Il tuo profilo', 'Impostazioni');
   const st = S.settings;
-  const admin = isAdmin();
+  const admin = isManager();
   const [pushOk, bioAvail] = await Promise.all([hasPushSubscription(), bio.available()]);
   if (S.tab !== 'impostazioni') return;
   const bioOn = bio.enabledFor(S.user.id);
@@ -1931,7 +1941,7 @@ async function renderSettings() {
       ${deferredInstall ? '<br><button class="btn gold" id="installBtn" style="margin-top:10px">Installa ora</button>' : ''}</div></div>` : ''}
 
     <div class="card glass ${admin ? '' : 'hidden'}" id="reqCard">
-      <h3>${admin ? 'Richieste da approvare' : 'Le tue richieste'}</h3>
+      <h3>${isAdmin() ? 'Richieste da approvare' : isSub() ? 'Richieste dei dipendenti' : 'Le tue richieste'}</h3>
       <div id="reqBox"><div class="muted">Caricamento…</div></div>
     </div>
 
@@ -1939,7 +1949,7 @@ async function renderSettings() {
       <h3>Il mio account</h3>
       <div class="member" style="padding-top:0">
         <div class="avatar">${esc(initials(S.me?.full_name || S.user.email))}</div>
-        <div class="info"><strong>${esc(S.me?.full_name || '')} ${admin ? '<span class="badge info">Admin</span>' : ''}</strong><small>${esc(S.user.email)}</small></div>
+        <div class="info"><strong>${esc(S.me?.full_name || '')} ${isAdmin() ? '<span class="badge info">Admin</span>' : isSub() ? '<span class="badge info">Sotto-admin</span>' : ''}</strong><small>${esc(S.user.email)}</small></div>
       </div>
       <div class="toggle-row" style="margin-top:8px">
         <div>Accesso con Face ID / impronta<small>${bioAvail ? (bioOn ? 'Attivo su questo telefono' : 'Sblocca l\'app senza digitare la password') : 'Non disponibile su questo dispositivo/browser'}</small></div>
@@ -1963,7 +1973,7 @@ async function renderSettings() {
     ${admin ? `<div class="card glass">
       <h3>Team</h3>
       <div id="teamBox"></div>
-      <button class="btn gold block" id="addMember" style="margin-top:10px">${ICON.plus} Nuovo dipendente</button>
+      ${isAdmin() ? `<button class="btn gold block" id="addMember" style="margin-top:10px">${ICON.plus} Nuovo dipendente</button>` : '<p class="note" style="margin:8px 0 0">Puoi vedere gli account e inviare il link per reimpostare la password. Solo Eriola crea o elimina account.</p>'}
     </div>
     <div class="card glass">
       <h3>Archivio attività</h3>
@@ -2001,7 +2011,7 @@ async function renderSettings() {
       try { await bio.enable(); toast('Face ID / impronta attivati ✨'); }
       catch { e.target.checked = false; toast('Attivazione annullata'); }
     } else {
-      if (isAdmin() && !(await secureConfirm({ title: 'Disattivare Face ID / impronta su questo telefono?', okLabel: 'Sì, disattiva', danger: true, identity: false }))) { e.target.checked = true; return; }
+      if (isManager() && !(await secureConfirm({ title: 'Disattivare Face ID / impronta su questo telefono?', okLabel: 'Sì, disattiva', danger: true, identity: isSub() }))) { e.target.checked = true; return; }
       bio.write(null); toast('Accesso biometrico disattivato');
     }
     renderSettings();
@@ -2017,7 +2027,7 @@ async function renderSettings() {
   });
   renderRequests($('#reqBox'));
   refreshRequestBadge();
-  if (admin) { renderTeam($('#teamBox')); $('#addMember').addEventListener('click', openNewMemberSheet); $('#openArchive').addEventListener('click', openActivityArchive); }
+  if (admin) { renderTeam($('#teamBox')); $('#addMember')?.addEventListener('click', openNewMemberSheet); $('#openArchive').addEventListener('click', openActivityArchive); }
 
   $('#saveDefaults').addEventListener('click', async () => {
     const next = {

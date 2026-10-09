@@ -74,8 +74,9 @@ Deno.serve(async (req) => {
   async function pushTo(userId: string, payload: unknown) {
     if (!subsCache[userId]) {
       // solo account attivi
-      const { data: prof } = await sb.from("profiles").select("active").eq("user_id", userId).maybeSingle();
-      if (prof && !prof.active) { subsCache[userId] = []; }
+      const { data: prof } = await sb.from("profiles").select("active, role").eq("user_id", userId).maybeSingle();
+      // account disattivati e sotto-admin non ricevono notifiche
+      if (prof && (!prof.active || prof.role === "subadmin")) { subsCache[userId] = []; }
       else {
         const { data } = await sb.from("push_subscriptions").select("*").eq("user_id", userId);
         subsCache[userId] = data || [];

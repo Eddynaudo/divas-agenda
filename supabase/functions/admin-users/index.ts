@@ -1,4 +1,6 @@
-// Diva's Agenda — gestione account dipendenti (solo amministratore)
+// Diva's Agenda — gestione account (amministratrice; il sotto-admin può solo vedere l'elenco)
+// L'identità viene verificata nel codice (auth.getUser), così ogni risposta include gli header CORS.
+// Le password NON vengono impostate da qui: il reset avviene via email e la nuova password la sceglie l'utente.
 import { createClient } from "npm:@supabase/supabase-js@2.45.4";
 
 const cors = {
@@ -17,13 +19,19 @@ Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   try {
     const jwt = (req.headers.get("Authorization") || "").replace("Bearer ", "");
+    if (!jwt) return json({ error: "Sessione scaduta: esci e rientra nell'app" }, 401);
     const { data: who, error: whoErr } = await admin.auth.getUser(jwt);
-    if (whoErr || !who?.user) return json({ error: "Non autenticato" }, 401);
+    if (whoErr || !who?.user) {
+      console.log("getUser error", whoErr?.message);
+      return json({ error: "Sessione scaduta: esci e rientra nell'app" }, 401);
+    }
     const { data: me } = await admin.from("profiles").select("*").eq("user_id", who.user.id).maybeSingle();
-    if (!me || me.role !== "admin" || !me.active) return json({ error: "Solo l'amministratore può gestire gli account" }, 403);
+    if (!me || !me.active || !["admin", "subadmin"].includes(me.role)) return json({ error: "Solo l'amministratrice può gestire gli account" }, 403);
 
     const body = await req.json().catch(() => ({}));
     const { action } = body;
+    // il sotto-admin può solo vedere l'elenco degli account
+    if (me.role !== "admin" && action !== "list") return json({ error: "Solo l'amministratrice può creare o modificare gli account" }, 403);
 
     if (action === "list") {
       const { data: profs } = await admin.from("profiles").select("*").order("role").order("created_at");
@@ -45,7 +53,9 @@ Deno.serve(async (req) => {
         email, password, email_confirm: true, user_metadata: { full_name },
       });
       if (error) {
-        const msg = /already|registered|exists/i.test(error.message) ? "Esiste già un account con questa email" : error.message;
+        console.log("createUser error", error.message);
+        const msg = /already|registered|exists/i.test(error.message) ? "Esiste già un account con questa email"
+          : /password/i.test(error.message) ? "Password troppo debole: usa almeno 8 caratteri con lettere e numeri" : error.message;
         return json({ error: msg }, 400);
       }
       const { error: pErr } = await admin.from("profiles").insert({ user_id: data.user.id, email, full_name, role: "staff" });
@@ -57,15 +67,6 @@ Deno.serve(async (req) => {
     if (!target) return json({ error: "Utente mancante" }, 400);
     const { data: tp } = await admin.from("profiles").select("*").eq("user_id", target).maybeSingle();
     if (!tp) return json({ error: "Utente non trovato" }, 404);
-
-    if (action === "reset_password") {
-      const password = String(body.password || "");
-      if (password.length < 8) return json({ error: "La password deve avere almeno 8 caratteri" }, 400);
-      const { error } = await admin.auth.admin.updateUserById(target, { password });
-      if (error) return json({ error: error.message }, 400);
-      return json({ ok: true });
-    }
-
     if (tp.role === "admin") return json({ error: "L'account amministratore non può essere modificato o eliminato" }, 403);
 
     if (action === "set_active") {
@@ -89,6 +90,7 @@ Deno.serve(async (req) => {
 
     return json({ error: "Azione sconosciuta" }, 400);
   } catch (e) {
+    console.log("admin-users exception", String(e));
     return json({ error: String(e) }, 500);
   }
 });
