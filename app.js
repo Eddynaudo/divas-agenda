@@ -1117,7 +1117,13 @@ function buildClientText(a) {
   const tpl = S.settings.client_template || 'Ciao {nome}! Ti ricordiamo il tuo appuntamento {quando} alle {ora}.';
   return tpl.replaceAll('{nome}', (a.client_name || '').split(' ')[0])
     .replaceAll('{quando}', whenLabel(d)).replaceAll('{data}', fmtLong(d))
-    .replaceAll('{ora}', hm(d)).replaceAll('{servizi}', a.services.join(', ').toLowerCase());
+    .replaceAll('{ora}', hm(d)).replaceAll('{servizi}', a.services.join(', ').toLowerCase())
+    .replaceAll('{whatsapp}', prettyPhone(S.settings.salon_whatsapp));
+}
+// +393489379342 → 348 937 9342
+function prettyPhone(p) {
+  const n = String(p || '').replace(/[^\d]/g, '').replace(/^39(?=3\d{8,9}$)/, '');
+  return n.length === 10 ? `${n.slice(0, 3)} ${n.slice(3, 6)} ${n.slice(6)}` : (p || '');
 }
 async function openSendPrompt(id, slot, appt) {
   let a = appt;
@@ -1132,6 +1138,7 @@ async function openSendPrompt(id, slot, appt) {
       <label>Messaggio<textarea id="msgText" rows="5">${esc(text)}</textarea></label>
       <button class="btn gold block" id="sendWa">${ICON.chat} Invia con WhatsApp</button>
       <button class="btn block" id="sendSms">${ICON.send} Invia con SMS</button>
+      ${S.settings.salon_whatsapp ? `<p class="pending-note" style="margin:0">Invia dal <b>WhatsApp Business del salone</b> (+39 ${esc(prettyPhone(S.settings.salon_whatsapp))}). Se si apre il WhatsApp personale, chiudilo e usa l'app WhatsApp Business.</p>` : ''}
       <p class="note">Si apre WhatsApp (o Messaggi) con il testo già pronto: tocca solo "Invia".</p>
     </div>`, (root) => {
     const t = () => encodeURIComponent($('#msgText', root).value);
@@ -1437,7 +1444,7 @@ async function openActivityArchive() {
 /* ───────── Impostazioni ───────── */
 const SETTING_LABELS = {
   staff_r1: 'Promemoria operatrice 1', staff_r2: 'Promemoria operatrice 2', client_r1: 'Promemoria cliente 1', client_r2: 'Promemoria cliente 2',
-  default_channel: 'Canale predefinito', default_duration: 'Durata predefinita', client_template: 'Testo messaggio cliente',
+  default_channel: 'Canale predefinito', default_duration: 'Durata predefinita', client_template: 'Testo messaggio cliente', salon_whatsapp: 'WhatsApp Business del salone',
 };
 function settingValueLabel(k, v) {
   if (k.startsWith('staff_r')) return optLabel(STAFF_OPTS, v);
@@ -1607,8 +1614,9 @@ async function renderSettings() {
         <label>Canale predefinito<select id="dCh"><option value="whatsapp" ${st.default_channel === 'whatsapp' ? 'selected' : ''}>WhatsApp</option><option value="sms" ${st.default_channel === 'sms' ? 'selected' : ''}>SMS</option><option value="nessuno" ${st.default_channel === 'nessuno' ? 'selected' : ''}>Nessuno</option></select></label>
         <label>Durata predefinita<select id="dDur">${DURATIONS.map((m) => `<option value="${m}" ${m === st.default_duration ? 'selected' : ''}>${durLabel(m)}</option>`).join('')}</select></label>
       </div>
+      <label>WhatsApp Business del salone<input id="dWa" type="tel" inputmode="tel" value="${esc(st.salon_whatsapp || '')}" placeholder="+39 348 937 9342"></label>
       <label>Testo del messaggio alla cliente<textarea id="dTpl" rows="4">${esc(st.client_template || '')}</textarea></label>
-      <p class="note" style="margin:-4px 0 0">Puoi usare <code>{nome}</code> <code>{quando}</code> <code>{data}</code> <code>{ora}</code> <code>{servizi}</code></p>
+      <p class="note" style="margin:-4px 0 0">Puoi usare <code>{nome}</code> <code>{quando}</code> <code>{data}</code> <code>{ora}</code> <code>{servizi}</code> <code>{whatsapp}</code></p>
       <button class="btn gold block" id="saveDefaults">${admin ? 'Salva impostazioni' : 'Invia richiesta di modifica'}</button>
     </div>
 
@@ -1648,7 +1656,7 @@ async function renderSettings() {
   $('#saveDefaults').addEventListener('click', async () => {
     const next = {
       staff_r1: +$('#dS1').value, staff_r2: +$('#dS2').value, client_r1: +$('#dC1').value, client_r2: +$('#dC2').value,
-      default_channel: $('#dCh').value, default_duration: +$('#dDur').value, client_template: $('#dTpl').value.trim(),
+      default_channel: $('#dCh').value, default_duration: +$('#dDur').value, client_template: $('#dTpl').value.trim(), salon_whatsapp: normalizePhone($('#dWa').value) || null,
     };
     const patch = {};
     Object.entries(next).forEach(([k, v]) => { if (String(st[k] ?? '') !== String(v)) patch[k] = v; });
